@@ -208,6 +208,22 @@ request, such as MCP servers connecting after the first one). The re-cache
 after a compaction or a clearing, and the first request of a window, are
 expected and counted apart.
 
+It also keeps this project's history of use by day, across sessions: each
+request's tokens, and each turn's cost as Claude Code's own cost figure rose
+by it; days before convo kept them are read once from the turns git holds
+(tokens only, and said so). The pane's Context section ends with the week:
+
+```
+  this project, last 7 days: $4.12 for the turns convo priced (50 from before it did), 312 turns, 18M in (93% from cache)
+```
+
+and the context tool has the last fourteen days, a line each:
+
+```
+  2026-10-23: $0.31 (50 turns not priced), 51 turns in 17 sessions, 8.3M in (7.2M / 1.1M / 190), 9.3k out
+  2026-10-22: 22 turns in 3 sessions, 2.0M in (1.7M / 295k / 70), 2.9k out
+```
+
 Ask Claude about your context, or to change any of it ("compact at 200k",
 "never hold back WebFetch"): its `context` tool reports the section and the
 settings, and asks you before it changes one.
@@ -393,7 +409,7 @@ home folder, with a scripted model and transcripts written the way Claude Code
 writes them: turns, a fork, a rewind, a keyframe and the turn after it, a
 native fallback, clearing old tool output, compacting at a set size,
 holding back unused tools and the context tool, condensing tool output, the
-brief a new conversation begins with, a merge, recall across branches,
+brief a new conversation begins with, the usage history, a merge, recall across branches,
 permission, a subagent, and spool recovery (a repeated flush, a corrupt file, a session that ended early).
 Each scenario runs in a process of its own. Node 22.6 or newer, or Bun.
 
@@ -444,6 +460,7 @@ afterwards.
 | `clearing.ts` | Which old tool outputs to clear, their stubs, and when it pays |
 | `condense.ts` | Condensing tool output as it arrives: failures kept, the rest counted |
 | `brief.ts` | The brief a new conversation begins with |
+| `spend.ts` | This project's use by day: tokens and cost across sessions |
 | `setup.ts` | The setup: each session's use, which tools to hold back, and what else went unused |
 | `permission.ts` | Asking before reading beyond this conversation |
 | `redact.ts` | Masking secrets |

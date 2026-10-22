@@ -36,7 +36,8 @@ import { addAgentRun, addClearing, addCondensed, addStep, addToolOutput, emptyLe
 import { applyClearing, planClearing, shouldClear } from './clearing.ts'
 import { condense } from './condense.ts'
 import { mask } from './redact.ts'
-import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
+import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
+import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
 import type { ConvoLedger } from '../types/index.d.ts'
 
 /**
@@ -222,6 +223,8 @@ const condensedNow = { outputs: 0, before: 0, after: 0 }
 /** This session's use of tools, skills and agent types, and the session it belongs to. */
 let usage: Usage = emptyUsage(Date.now())
 let usageSid = ''
+/** Other sessions' days in this project, read with the window. */
+let others: Awaited<ReturnType<typeof projectDays>> = []
 /** What the project used in the window, read from the records at most every ten minutes. */
 let window: { at: number; w: Awaited<ReturnType<typeof usedInWindow>> } | undefined
 
@@ -236,6 +239,8 @@ async function usageFor(sid: string): Promise<Usage> {
 }
 /** The Io the usage records go through; set at session start. */
 let ioOfStatic: Io
+/** The session's cost as Claude Code had it at the last main turn: what each turn cost is what it rose by. */
+let lastCostUsd: number | undefined
 
 /**
  * A finished turn in the ledger: the tool output it added, a subagent's run,
@@ -261,6 +266,15 @@ async function countTurn($: EngineInterface, agentId: string | undefined, rows: 
       const u = await $.session.usage({ breakdown: 'summary' })
       const categories = u.context.breakdown?.categories ?? []
       l = { ...l, ...readBreakdown(categories), ...(u.cost ? { costUsd: u.cost.usd } : {}) }
+      // This turn in the project's history: what the session's cost rose by since the last one
+      if (S.gitOk) {
+        const usd = u.cost?.usd
+        const was = lastCostUsd ?? l.costBase
+        // A cost lower than the last one started over (/clear, another session in this process): this turn cost all of it
+        addTurn((usage.days ??= {}), dayOf(now), usd !== undefined && was !== undefined ? (usd >= was ? usd - was : usd) : undefined)
+        lastCostUsd = usd
+        await saveUsage(ioOfStatic, S.sid, usage)
+      }
       if (S.gitOk) {
         if (toolSizesDirty) {
           toolSizesDirty = false
@@ -270,8 +284,10 @@ async function countTurn($: EngineInterface, agentId: string | undefined, rows: 
           // Judged on this project's use: what git holds from before convo kept records is read first, once
           await backfillUsage(ioOfStatic, now).catch(err => $.ui.log(`convo: no use history from git: ${String(err).slice(0, 200)}`, { to: 'debug' }))
           window = { at: now, w: await usedInWindow(ioOfStatic, now, usage) }
+          others = await projectDays(ioOfStatic, S.sid, emptyUsage(now))
         }
         else window = { at: window.at, w: { ...window.w, used: { tools: new Set([...window.w.used.tools, ...Object.keys(usage.tools)]), skills: new Set([...window.w.used.skills, ...Object.keys(usage.skills)]), agents: new Set([...window.w.used.agents, ...Object.keys(usage.agents)]) } } }
+        l.history = weekLine(sumDays([...others, usage.days ?? {}]), now)
         const b = u.context.breakdown
         l.compactAt = settings.compactAt || undefined
         l.autoCompactAt = u.context.breakdown?.autoCompactThreshold
@@ -418,9 +434,16 @@ function settingValue(key: SettingKey, v: unknown): { value: number | boolean | 
  */
 async function contextTool($: EngineInterface, input: { readonly [k: string]: unknown }): Promise<string> {
   const asked = SETTINGS.filter(key => input[key] !== undefined)
+  // Asked before the first turn has ended: the project's other days are read now
+  if (!window && S.gitOk) {
+    const now = Date.now()
+    await backfillUsage(ioOfStatic, now).catch(() => undefined)
+    others = await projectDays(ioOfStatic, S.sid, emptyUsage(now))
+  }
   const report = (): string => {
     const lines = ledgerRows(ledger, 100).map(r => r.text).filter(Boolean)
-    return [lines.length ? lines.join('\n') : 'No requests counted yet in this window.', '', 'Settings (/config, under convo):', settingsText()].join('\n')
+    const days = sumDays([...others, usage.days ?? {}])
+    return [lines.length ? lines.join('\n') : 'No requests counted yet in this window.', '', historyText(days, Date.now()), '', 'Settings (/config, under convo):', settingsText()].join('\n')
   }
   if (!asked.length) return report()
   const changes: { key: SettingKey; value: number | boolean | string }[] = []
@@ -784,6 +807,7 @@ export const register: Register = (on, options) => {
       const u = response.usage
       if (u) {
         ledger = addStep(ledger ?? emptyLedger(Date.now()), { loop: e.agentId ?? 'main', model: u.model || e.model, at: Date.now(), uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens }, { compactedAt: S.compactedAt, turn: e.agentId ? undefined : turnNow })
+        addRequest((usage.days ??= {}), dayOf(Date.now()), { uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens })
         await saveLedger($)
       }
     } catch {

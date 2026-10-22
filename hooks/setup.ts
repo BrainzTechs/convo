@@ -10,6 +10,7 @@ import type { Row } from './turns.ts'
 import type { ConvoTrim } from '../types/index.d.ts'
 import { S } from './state.ts'
 import { git } from './git.ts'
+import { daysFromHistory, type DayTotals } from './spend.ts'
 
 const DAY = 24 * 60 * 60_000
 /** How far back use counts. */
@@ -40,7 +41,7 @@ export function shouldHoldBack(tool: string, o: { on: boolean; toolSearch: boole
 }
 
 /** What one session used: names by kind, with the time each was last used. */
-export type Usage = { started: number; tools: Record<string, number>; skills: Record<string, number>; agents: Record<string, number> }
+export type Usage = { started: number; tools: Record<string, number>; skills: Record<string, number>; agents: Record<string, number>; days?: Record<string, DayTotals> }
 
 export const emptyUsage = (started: number): Usage => ({ started, tools: {}, skills: {}, agents: {} })
 
@@ -52,7 +53,7 @@ export function commandName(text: string): string | undefined {
 
 /** Adds what a finished turn's rows used. */
 export function addUsage(u: Usage, rows: readonly Row[], at: number): Usage {
-  const out: Usage = { started: u.started, tools: { ...u.tools }, skills: { ...u.skills }, agents: { ...u.agents } }
+  const out: Usage = { ...u, tools: { ...u.tools }, skills: { ...u.skills }, agents: { ...u.agents } }
   for (const r of rows) {
     for (const b of r.blocks) {
       if (b.type === 'tool_use') {
@@ -139,10 +140,15 @@ export async function loadUsage(io: Io, sid: string): Promise<Usage | undefined>
   }
 }
 
-/** Fills usage/git.json from the turns of branches active in the window, once per project. */
+/** Fills usage/git.json from the turns of branches active in the window, once per project (its days once more, for records written before they were kept). */
 export async function backfillUsage(io: Io, now: number): Promise<void> {
   const p = `${usageDir()}/git.json`
-  if (await io.fs.exists(p)) return
+  if (await io.fs.exists(p)) {
+    const kept = JSON.parse(await io.fs.read(p)) as Usage
+    if (kept.days) return
+    await io.fs.write(p, JSON.stringify({ ...kept, days: await historyDays(io, now) }))
+    return
+  }
   const since = now - WINDOW_DAYS * DAY
   const refs = await git(io, ['for-each-ref', '--format=%(committerdate:unix) %(objectname)', 'refs/heads/'])
   const tips = [...new Set((refs.ok ? refs.out.split('\n') : []).map(l => l.split(' ')).filter(([t]) => Number(t) * 1000 >= since).map(([, h]) => h ?? ''))].filter(Boolean).slice(0, 200)
@@ -158,7 +164,47 @@ export async function backfillUsage(io: Io, now: number): Promise<void> {
   const u = emptyUsage(started)
   for (const t of names.tools) u.tools[t] = now
   for (const s of names.skills) u.skills[s] = now
+  u.days = await historyDays(io, now)
   await io.fs.write(p, JSON.stringify(u))
+}
+
+/** Tokens by day from the turns git holds on branches active in the window, less the sessions with their own record of days. */
+async function historyDays(io: Io, now: number): Promise<Record<string, DayTotals>> {
+  const since = now - WINDOW_DAYS * DAY
+  const refs = await git(io, ['for-each-ref', '--format=%(committerdate:unix) %(objectname)', 'refs/heads/'])
+  const tips = [...new Set((refs.ok ? refs.out.split('\n') : []).map(l => l.split(' ')).filter(([t]) => Number(t) * 1000 >= since).map(([, h]) => h ?? ''))].filter(Boolean).slice(0, 200)
+  if (!tips.length) return {}
+  const skip = new Set<string>()
+  const dir = usageDir()
+  for (const f of (await io.fs.exists(dir)) ? await io.fs.list(dir) : []) {
+    if (!f.name.endsWith('.json') || f.name === 'git.json') continue
+    try {
+      if ((JSON.parse(await io.fs.read(`${dir}/${f.name}`)) as Usage).days) skip.add(f.name.slice(0, -'.json'.length))
+    } catch {
+      // A record half written is someone else's to finish
+    }
+  }
+  const lines = await git(io, ['grep', '-h', '-I', '-E', '^(turnId|session|agent|at|usage): ', ...tips, '--', 'turns', 'agents'])
+  const days = daysFromHistory(lines.ok ? lines.out : '', skip)
+  for (const day of Object.keys(days)) if (Date.parse(`${day}T23:59:59`) < since) delete days[day]
+  return days
+}
+
+/** Every session's days in this project, this one's as it stands in memory. */
+export async function projectDays(io: Io, sid: string, current: Usage): Promise<Record<string, DayTotals>[]> {
+  const out: Record<string, DayTotals>[] = []
+  const dir = usageDir()
+  for (const f of (await io.fs.exists(dir)) ? await io.fs.list(dir) : []) {
+    if (!f.name.endsWith('.json') || f.name === `${sid}.json`) continue
+    try {
+      const u = JSON.parse(await io.fs.read(`${dir}/${f.name}`)) as Usage
+      if (u.days) out.push(u.days)
+    } catch {
+      // A record half written is read next time
+    }
+  }
+  if (current.days) out.push(current.days)
+  return out
 }
 
 /** Everything used in the window across this project's records, how many sessions, how many days, and whether agents count. */

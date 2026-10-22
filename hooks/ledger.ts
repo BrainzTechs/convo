@@ -178,6 +178,7 @@ export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[]
   if (l.compactAt) add(`  compacts at ${k(l.compactAt)} with a keyframe (your setting)${l.autoCompactAt ? `; Claude Code's own limit ${k(l.autoCompactAt)}` : ''}`, 'dim')
   else if (l.autoCompactAt) add(`  compacts at Claude Code's limit, ${k(l.autoCompactAt)}, with a keyframe`, 'dim')
   add(`  ${k(input)} in over ${l.requests} request${l.requests === 1 ? '' : 's'}, ${k(l.output)} out`)
+  if (l.history) add(l.history, 'dim')
   const rate = input ? Math.round((100 * l.read) / input) : 0
   const misses = l.misses.length
   const warm = l.warmup && l.warmup >= MISS_TOKENS ? ` · ${k(l.warmup)} cached by the first request` : ''

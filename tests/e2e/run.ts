@@ -281,6 +281,34 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('with the setting off, no brief', off.lastContext.length === 0)
   },
 
+  async spend(dir, check) {
+    // Session A: before convo kept days, so git alone has its turns
+    const w = await world(dir)
+    await w.start(A)
+    for (let i = 1; i <= 3; i++) await w.turn(`Step ${i}.`, 'Done.', { tools: [{ name: 'Bash', input: { command: 'ls' }, output: 'a' }] })
+    await w.timers()
+    rmSync(`${w.root}/usage`, { recursive: true })
+    // Session B keeps its own days, cost included
+    const v = await world(dir)
+    await v.start(B)
+    await v.turn('Go on.', 'Going.')
+    await v.turn('And more.', 'More.')
+    const own = JSON.parse(readFileSync(`${v.root}/usage/${B}.json`, 'utf8'))
+    const today = (await import('../../hooks/spend.ts')).dayOf(Date.now())
+    const d = own.days?.[today]
+    check("a session's record keeps its day: two turns, its requests' tokens and what they cost", d?.turns === 2 && d.read + d.write + d.uncached > 0 && typeof d.usd === 'number' && d.usd > 0, JSON.stringify(own.days))
+    const git = JSON.parse(readFileSync(`${v.root}/usage/git.json`, 'utf8'))
+    check("git's turns fill the days before, session A's three", git.days?.[today]?.turns === 3 && git.days[today].sessions === 1, JSON.stringify(git.days))
+    check('the pane has the week, saying which turns it could not price', /^ {2}this project, last 7 days: \$\d+\.\d\d for the turns convo priced \(3 from before it did\), 5 turns, /.test(v.ledger()?.history ?? ''), v.ledger()?.history)
+    const r = await v.tool('context', {})
+    check('the context tool has the days', (r.result ?? '').includes(`${today}: $`) && (r.result ?? '').includes('(3 turns not priced), 5 turns in 2 sessions'), r.result)
+    // Asked before any turn of a new session has ended, the earlier days are there too
+    const x = await world(dir)
+    await x.start('eeeeeeee-0000-4000-8000-000000000005')
+    const early = await x.tool('context', {})
+    check('asked during the first turn, the context tool still has the earlier days', (early.result ?? '').includes(`${today}:`) && (early.result ?? '').includes('5 turns'), early.result)
+  },
+
   async fork(dir, check) {
     const w = await world(dir)
     await w.start(A)
