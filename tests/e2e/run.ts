@@ -332,6 +332,32 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('and merges it once', w.git('rev-list', '--parents', '-n', '1', `session/${A}`).split(' ').length === 2)
   },
 
+  async history(dir, check) {
+    const w = await world(dir)
+    await w.start(A, true)
+    const goTest = [...Array.from({ length: 300 }, (_, i) => `--- PASS: TestLedger${i} (0.00s)`), '--- FAIL: TestTransfer (0.01s)'].join('\n')
+    await w.turn(FIRST, 'Noted.')
+    await w.turn('Run the tests.', 'One fails.', { tools: [{ name: 'Bash', input: { command: 'go test ./...' }, output: goTest }, { name: 'Read', input: { file_path: '/p/a.go' }, output: 'package a' }, { name: 'Bash', input: { command: 'go vet' }, output: 'ok' }] })
+    await w.turn('Count the files, in the background.', 'Counting.', { background: [{ id: 'bg0002', prompt: 'Run ls -la and count.', answer: 'Four.' }] })
+    await w.finishAgent('bg0002')
+    await w.turn('What did it find?', 'Four.')
+    await w.timers()
+    await w.compact('manual')
+    await w.turn('Next.', 'On it.')
+    await w.timers()
+    await w.timers()
+    const h = w.view()?.history ?? []
+    const turns = h.filter((e: any) => e.kind === 'turn')
+    check('newest first, every turn of the line', turns.map((e: any) => e.n).join() === '5,4,3,2,1', JSON.stringify(h.map((e: any) => [e.kind, e.n, e.title])))
+    const run = turns.find((e: any) => e.n === 2)
+    check('a turn says its tools, what was condensed in it, and what it cost', run?.tools === 'Bash×2 Read' && /→ .* tokens \(1 output\)/.test(run?.condensed ?? '') && typeof run?.usd === 'number', JSON.stringify(run))
+    const merged = turns.find((e: any) => e.n === 4)
+    check('the turn a background subagent merged into names it and its task', merged?.agents?.[0]?.id === 'bg0002' && merged.agents[0].title === 'Run ls -la and count.', JSON.stringify(merged))
+    check('the keyframe sits where it was made', h.findIndex((e: any) => e.kind === 'keyframe') === 1, JSON.stringify(h.map((e: any) => e.kind)))
+    check('each turn has its file, for opening it', turns.every((e: any) => /^turns\/\d{4}-/.test(e.path ?? '')), JSON.stringify(turns.map((e: any) => e.path)))
+    check('and the view has the tip to read them from', w.view()?.tip === w.git('rev-parse', `session/${A}`))
+  },
+
   async fork(dir, check) {
     const w = await world(dir)
     await w.start(A)

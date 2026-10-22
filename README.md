@@ -339,32 +339,43 @@ finishes after its conversation was cleared or switched.
 
 ## Looking at it
 
-convo's pane sits beside the chat and follows the conversation as it goes:
+convo's pane sits beside the chat and follows the conversation as it goes,
+in three tabs: **1 History**, this conversation's commits newest first;
+**2 Context**, what every request carries (next section); **3 Lines**, forks,
+rewinds, merges and open questions.
 
 ```
-Session 779e850b · 13 turns
-Claude works from keyframe 3, made after turn 7, then 6 turns.
-1 question open:
-  HTTP port: undecided (here, turn 5) or 8080 (branch 3162559f, turn 5)?
-
-Lines
-  fork 3162559f · split after turn 4 · 1 turn · merged after turn 5, 2 questions · 2 hours ago
-    “In this branch only, rename to ledgerx”
-  rewound after turn 4 · 1 turn · 2 hours ago
-    “One more decision: the HTTP port is 8080”
-  1 subagent, 1 merged in
-2 other conversations in this project.
+aaaaaaaa · 14 turns · from keyframe 2 + 3
+1: [History]  2: Context  3: Lines
+────────────────────────────────────────────
+● 14  now  Fix the transfer test
+│          Edit×2 Bash · 41k in · $0.04
+│╲ ⑂       Find where assembleTurn is defined
+✂         cleared 39k tokens (5 outputs) of old tool output
+● 13  2m   Run the tests
+│          Bash · 38k in · $0.03 · condensed 6.4k → 94 tokens (1 output)
+◆     12m  keyframe 2 · turns 1–10
+● 10  12m  Add the /metrics endpoint
 ```
+
+Each turn shows its tools, tokens and cost; a subagent merged into it (⑂),
+what was condensed in it and what was cleared before it (✂); keyframes (◆)
+and Claude Code's own summaries sit where they were made. Give the pane the
+keyboard with ctrl+x tab: Tab moves between turns, Enter opens one (what was
+asked, the answer, its tools and files), and `r` puts "show turn N in full"
+in your prompt box, for you to send or not. On a subagent's row Enter puts in
+a prompt asking what it did; in Lines, a fork's button one asking to merge
+it. Nothing is ever sent for you. With a subagent's transcript open from the
+tasks list, History shows that subagent's own turns. Each turn's commit
+carries what History shows (`Tools:`, `Tokens:`, `Cost:`, `Condensed:`,
+`Cleared-Before:`, `Brief-From:` trailers); older turns are read from their
+turn files.
 
 It opens by itself in an interactive session when the screen is wide enough
 (Claude Code places a pane nobody asked for from 144 columns). Close it and it
 stays closed in later sessions; ask Claude to show convo's pane and it comes
-back. "What Claude works from" is the newest compaction on this line: after
-it, Claude sees that keyframe (or Claude Code's own summary) and the turns
-since, not the turns before.
-
-Below the lines, the pane's **Context** section shows what the context
-manager is doing (next section).
+back. "From keyframe 2 + 3" is the newest compaction on this line: Claude
+sees that keyframe (or Claude Code's own summary) and the 3 turns since.
 
 To look at the history yourself, use git directly, for example:
 
@@ -468,7 +479,8 @@ afterwards.
 | `checkpoint.ts`, `keyframes.ts` | Records and keyframes |
 | `session.ts` | Session switches and native compactions noticed |
 | `history.ts`, `tools.ts` | recall, turn, branches, merge and pane |
-| `view.ts` | What the pane beside the chat shows, built from git, and its rows (`types/index.d.ts` declares it) |
+| `view.ts` | What the pane beside the chat shows, built from git (`types/index.d.ts` declares it) |
+| `timeline.ts`, `panel.ts` | The pane's History from git, and its three tabs as lines and buttons |
 | `ledger.ts` | The token ledger and cache misses the pane shows |
 | `clearing.ts` | Which old tool outputs to clear, their stubs, and when it pays |
 | `condense.ts` | Condensing tool output as it arrives: failures kept, the rest counted |

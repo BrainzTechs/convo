@@ -31,14 +31,18 @@ import { permit } from './permission.ts'
 import { REFRESH_TURNS, briefSource, buildCheckpoint, buildOwed, refreshRecords } from './keyframes.ts'
 import { BRIEF_DAYS, renderBrief } from './brief.ts'
 import { branchList, mergeBranch, readTurn, recall, registerTools } from './tools.ts'
-import { buildView, emptyView, paneRows, type PaneRow } from './view.ts'
-import { addAgentRun, addClearing, addCondensed, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
+import { buildView, emptyView, type PaneRow } from './view.ts'
+import { addAgentRun, addClearing, addCondensed, addStep, addToolOutput, emptyLedger, k, ledgerRows, readBreakdown } from './ledger.ts'
 import { applyClearing, planClearing, shouldClear } from './clearing.ts'
 import { condense } from './condense.ts'
 import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
-import type { ConvoLedger } from '../types/index.d.ts'
+import type { ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
+import { panelNodes, type Action } from './panel.ts'
+import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
+import { revOf } from './git.ts'
+import { withTrailers } from './lineage.ts'
 
 /**
  * The engine as convo's modules use it. Claude Code follows `$` only into
@@ -97,6 +101,40 @@ async function publish($: EngineInterface, look = false): Promise<void> {
   } catch (err) {
     $.ui.log(`convo: the pane's view was not rebuilt: ${String(err).slice(0, 200)}`, { to: 'debug' })
   }
+}
+
+// ── The pane's tabs, and what its buttons do ─────────────────────────
+const UI = { plugin: 'convo', key: 'ui' } as const
+
+/** A pressed button: switch tab, open or close a turn (reading its detail from git), or put a prompt in the box. */
+async function act($: EngineInterface, a: Action): Promise<void> {
+  try {
+    const ui: ConvoUi = (await $.state.get(UI)).value ?? { tab: 'history' }
+    if (a.kind === 'tab') {
+      await $.state.set(UI, { ...ui, tab: a.tab })
+    } else if (a.kind === 'fill') {
+      await $.prompt.fill({ text: a.text, mode: 'replace' })
+    } else if (ui.open === a.id) {
+      await $.state.set(UI, { tab: ui.tab })
+    } else {
+      await $.state.set(UI, { tab: ui.tab, open: a.id })
+      const detail = a.path && a.tip ? await turnDetail(ioOf($), a.tip, a.path) : undefined
+      const now: ConvoUi = (await $.state.get(UI)).value ?? { tab: 'history' }
+      if (now.open === a.id) await $.state.set(UI, { ...now, detail: detail ?? { asked: '', answer: '(not found in git yet: it is committed a moment after the turn ends)', tools: [], files: [] } })
+    }
+  } catch (err) {
+    $.ui.log(`convo: the pane's ${a.kind} did not go through: ${String(err).slice(0, 200)}`, { to: 'debug' })
+  }
+}
+
+/** A subagent's history, read from its branch when the branch moved. */
+let agentSeen: { agent: string; tip: string; history: ConvoEntry[] } | undefined
+async function agentHistory(io: Io, agent: string): Promise<Pick<ConvoView, 'turns' | 'history' | 'tip'>> {
+  const owner = agentSession.get(agent) ?? S.sid
+  const tip = (await revOf(io, refs.agent(owner, agent))) ?? ''
+  if (!tip) return { turns: 0, history: [] }
+  if (agentSeen?.agent !== agent || agentSeen.tip !== tip) agentSeen = { agent, tip, history: await buildTimeline(io, tip) }
+  return { turns: agentSeen.history.filter(x => x.kind === 'turn').length, history: agentSeen.history, tip }
 }
 
 // ── The token ledger ─────────────────────────────────────────────────
@@ -167,6 +205,7 @@ async function briefFor($: EngineInterface): Promise<string | undefined> {
   const b = src ? renderBrief(src) : undefined
   if (!src || !b) return undefined
   ledger = { ...(ledger ?? emptyLedger(Date.now())), brief: { from: src.sid, ...b.counts, tokens: tokensOf(b.text) } }
+  forNextCommit.brief = src.sid.slice(0, 8)
   await saveLedger($)
   return b.text
 }
@@ -213,11 +252,20 @@ async function condensedRow(io: Io, agentId: string | undefined, content: readon
     condensedNow.outputs += 1
     condensedNow.before += Math.ceil(c.before / 3.5)
     condensedNow.after += Math.ceil(c.after / 3.5)
+    // And for the turn's own commit, by loop
+    const loop = agentId ?? 'main'
+    const t = condensedInTurn.get(loop) ?? { outputs: 0, before: 0, after: 0 }
+    condensedInTurn.set(loop, { outputs: t.outputs + 1, before: t.before + Math.ceil(c.before / 3.5), after: t.after + Math.ceil(c.after / 3.5) })
     out.push({ ...b, content: c.text })
     changed = true
   }
   return changed ? out : undefined
 }
+/** Condensed in the turn under way, by loop ('main' or a subagent's id): its commit says so. */
+const condensedInTurn = new Map<string, { outputs: number; before: number; after: number }>()
+/** What the turn's commit records beside its files: the main turn's cost, a clearing since the last one, its brief. */
+const forNextCommit: { usd?: number; cleared?: string; brief?: string } = {}
+
 /** Condensed since the ledger last counted: added to it as each turn ends. */
 const condensedNow = { outputs: 0, before: 0, after: 0 }
 /** This session's use of tools, skills and agent types, and the session it belongs to. */
@@ -271,7 +319,9 @@ async function countTurn($: EngineInterface, agentId: string | undefined, rows: 
         const usd = u.cost?.usd
         const was = lastCostUsd ?? l.costBase
         // A cost lower than the last one started over (/clear, another session in this process): this turn cost all of it
-        addTurn((usage.days ??= {}), dayOf(now), usd !== undefined && was !== undefined ? (usd >= was ? usd - was : usd) : undefined)
+        const turnUsd = usd !== undefined && was !== undefined ? (usd >= was ? usd - was : usd) : undefined
+        addTurn((usage.days ??= {}), dayOf(now), turnUsd)
+        forNextCommit.usd = turnUsd
         lastCostUsd = usd
         await saveUsage(ioOfStatic, S.sid, usage)
       }
@@ -342,6 +392,8 @@ async function clearOld($: EngineInterface): Promise<boolean> {
     S.compactedAt = Date.now()
     const r = await $.session.compact({ instructions: 'convo: clearing old tool output' })
     if (r.skip !== undefined) $.ui.log(`convo: clearing skipped: ${r.skip}`, { to: 'debug' })
+    // The next turn's commit says what was cleared before it
+    else forNextCommit.cleared = `${k(plan.tokens)} tokens (${plan.stubs.size} output${plan.stubs.size === 1 ? '' : 's'})`
     return r.skip === undefined
   } catch (err) {
     const text = String(err)
@@ -474,8 +526,8 @@ async function contextTool($: EngineInterface, input: { readonly [k: string]: un
 }
 
 /** How each kind of row reads. */
-function toneOf(tone: PaneRow['tone']): Record<string, unknown> {
-  if (tone === 'title') return { bold: true }
+function toneOf(tone: PaneRow['tone'] | 'bold'): Record<string, unknown> {
+  if (tone === 'title' || tone === 'bold') return { bold: true }
   if (tone === 'dim') return { dimColor: true }
   if (tone === 'warn') return { color: 'warning' }
   if (tone === 'good') return { color: 'success' }
@@ -584,13 +636,22 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
-    const got = await $.state.get(VIEW)
-    const tokens = await $.state.get(LEDGER)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    let view = (await $.state.get(VIEW)).value
+    const tokens = (await $.state.get(LEDGER)).value
+    const ui: ConvoUi = (await $.state.get(UI)).value ?? { tab: 'history' }
     const width = Math.max(20, e.props.bodyColumns)
-    const rows = paneRows(got.value, width, ledgerRows(tokens.value, width))
+    // A subagent's transcript in view: its own branch's history
+    const agent = e.props.view?.agentId
+    if (agent && view && S.gitOk) {
+      const history = await agentHistory(ioOf($), agent)
+      view = { ...view, ...history, questions: [], lines: [], merges: [], context: undefined }
+    }
+    const nodes = panelNodes({ view, ledger: tokens, ui, width, now: Date.now(), focused: e.props.isFocused, ...(agent ? { agent } : {}) })
     // Drawn with h() rather than JSX, so this module stays a .ts file Node can run in the tests
-    return h(Box, { flexDirection: 'column' }, ...rows.map(r => h(Text, toneOf(r.tone), r.text || ' '))) as RenderElement
+    return h(Box, { flexDirection: 'column' }, ...nodes.map(n => (n.t === 'text'
+      ? h(Text, toneOf(n.tone), n.text || ' ')
+      : h(Button, { key: n.key, plain: true, ...(n.hotkey ? { hotkey: n.hotkey } : {}), ...(n.tone === 'dim' ? { dimColor: true } : {}), onPress: () => void act($, n.action) }, n.tone === 'bold' ? h(Text, { bold: true }, n.text) : n.text)))) as RenderElement
   })
 
   on('session.end', async ($, e, next) => {
@@ -870,7 +931,28 @@ export const register: Register = (on, options) => {
       const lineage = agentId
         ? baseRows.length ? { baseRows, transcript: transcriptOf(owner) } : {}
         : { rows: rows.map(r => r.uuid), transcript: transcriptOf(S.sid), ...(merging.length ? { merge: merging.map(a => refs.agent(S.sid, a)) } : {}) }
-      await enqueue(ioOf($), { ref, base: agentId ? refs.session(owner) : undefined, numberIn: turnDir(agentId), files: out.files, message: out.message, at, ...lineage })
+      // What the pane's History reads without opening the turn: tools, tokens, and for the main thread its cost, what was
+      // condensed in it, cleared before it, and the brief it began with
+      const loop = agentId ?? 'main'
+      const used = rows.flatMap(r => r.blocks.flatMap(b => (b.type === 'tool_use' ? [b.name] : [])))
+      const u = (usage ?? {}) as { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
+      const tokensIn = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+      const cond = condensedInTurn.get(loop)
+      condensedInTurn.delete(loop)
+      const facts = [
+        ...(used.length ? [`Tools: ${toolsLine(used)}`] : []),
+        ...(tokensIn || u.output_tokens ? [`Tokens: in ${tokensIn}, out ${u.output_tokens ?? 0}`] : []),
+        ...(cond ? [`Condensed: ${k(cond.before)} → ${k(cond.after)} tokens (${cond.outputs} output${cond.outputs === 1 ? '' : 's'})`] : []),
+        ...(!agentId && forNextCommit.usd !== undefined ? [`Cost: ${forNextCommit.usd.toFixed(4)}`] : []),
+        ...(!agentId && forNextCommit.cleared ? [`Cleared-Before: ${forNextCommit.cleared}`] : []),
+        ...(!agentId && forNextCommit.brief ? [`Brief-From: ${forNextCommit.brief}`] : []),
+      ]
+      if (!agentId) {
+        forNextCommit.usd = undefined
+        forNextCommit.cleared = undefined
+        forNextCommit.brief = undefined
+      }
+      await enqueue(ioOf($), { ref, base: agentId ? refs.session(owner) : undefined, numberIn: turnDir(agentId), files: out.files, message: withTrailers(out.message, facts), at, ...lineage })
       for (const a of late) lateAgents.delete(a)
       // A subagent whose spawning turn has already ended (a background one): the next main turn in its session merges it
       if (agentId && !S.mainRows.some(r => r.blocks.some(b => b.type === 'tool_use' && agentsByToolUse.get(b.id) === agentId))) {

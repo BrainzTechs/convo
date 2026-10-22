@@ -26,6 +26,38 @@ export type ConvoLine = {
 export type ConvoMerge = { from: string; afterTurn: number; conflicts: number; /** Where the two lines split, as the merge recorded it. */ base?: string }
 
 /** What the pane shows, rebuilt from git whenever this project's history moves. */
+/** One entry of the pane's History: a turn, a keyframe or summary, or a merge of another line. */
+export type ConvoEntry = {
+  kind: 'turn' | 'keyframe' | 'native' | 'merge'
+  /** The commit, short. */
+  id: string
+  /** The turn's number, or the keyframe's. */
+  n?: number
+  /** When it was committed (ISO). */
+  at: string
+  title: string
+  /** A turn's tools ("Edit×2 Bash"), tokens (in, out), cost, what was condensed in it and cleared before it. */
+  tools?: string
+  tokens?: { in: number; out: number }
+  usd?: number
+  condensed?: string
+  clearedBefore?: string
+  /** The conversation the brief it began with came from. */
+  brief?: string
+  /** Subagents merged in this turn: their id and the task they were given. */
+  agents?: { id: string; title: string }[]
+  /** "branched from …" or "rewound to …", where the line turned. */
+  mark?: string
+  /** The turn file, for its detail. */
+  path?: string
+}
+
+/** An open turn's detail in the pane: what was asked, the answer, its tools, the files it touched. */
+export type ConvoDetail = { asked: string; answer: string; tools: string[]; files: string[] }
+
+/** The pane's own state: the tab, and the turn open in History with its detail. */
+export type ConvoUi = { tab: 'history' | 'context' | 'lines'; open?: string; detail?: ConvoDetail }
+
 export type ConvoView = {
   /** Why history is off in this session, when it is. */
   off?: string
@@ -45,6 +77,9 @@ export type ConvoView = {
   others: number
   /** When it was built. */
   at: string
+  /** The line's tip, and its newest commits for the History tab. */
+  tip?: string
+  history?: ConvoEntry[]
 }
 
 /** A prompt-cache miss: a request that re-cached what the last one had cached. */
@@ -121,6 +156,6 @@ export type ConvoLedger = {
 
 declare module 'claude-code' {
   interface PluginState {
-    convo: { view: ConvoView; ledger: ConvoLedger }
+    convo: { view: ConvoView; ledger: ConvoLedger; ui: ConvoUi }
   }
 }

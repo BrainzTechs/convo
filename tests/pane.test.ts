@@ -82,11 +82,14 @@ describe('what the pane says', () => {
 })
 
 /** Claude Code with git that holds nothing yet, and a surface that places panes. */
-function world(on: On, opened: string[], stored: Record<string, unknown> = {}): void {
+function world(on: On, opened: string[], stored: Record<string, unknown> = {}, gitAnswer: (args: readonly string[]) => string | undefined = () => undefined): void {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'aaaaaaaa-0000-4000-8000-000000000001' }))
   on('session.messages', () => ({ value: [] }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', ($, e) => {
+    const out = e.argv[0] === 'git' ? gitAnswer(e.argv.slice(2)) : undefined
+    return { value: { exitCode: out === null ? 1 : 0, stdout: out ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('fs.exists', ($, e) => ({ value: e.path.endsWith('/HEAD') }))
   on('fs.write', () => ({ value: undefined }))
   on('fs.list', () => ({ value: [] }))
@@ -105,16 +108,63 @@ function world(on: On, opened: string[], stored: Record<string, unknown> = {}): 
 const PANE = { plugin: 'convo', component: 'Pane', requestId: 'convo', props: { title: 'convo', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
 
 describe('the pane', () => {
-  test('draws what convo published on every surface', async ($, on) => {
+  test('draws what convo published on every surface: the header, the tabs, History first', async ($, on) => {
     world(on, [])
     // A session with nothing in git yet: the view convo publishes at its start
     await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: false })
     for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect((await ui.find({ type: 'Text', text: /^Session / }))?.text).toBe('Session aaaaaaaa · 0 turns')
+      expect((await ui.find({ type: 'Text', text: /^aaaaaaaa / }))?.text).toBe('aaaaaaaa · 0 turns')
       expect((await ui.find({ type: 'Text', text: /Nothing recorded/ }))?.text).toBe('Nothing recorded yet: each turn lands here when it ends.')
+      expect((await ui.find({ type: 'Text', text: /ctrl\+x tab/ }))?.text).toBe('ctrl+x tab to use this pane')
       await ui.unmount()
     }
+  })
+
+  test('the tabs switch on a press, on every surface', async ($, on) => {
+    world(on, [])
+    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: false })
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      await ui.press({ key: 'tab-context' })
+      expect((await ui.find({ type: 'Text', text: /No requests counted/ }))?.text).toBe('No requests counted yet in this window.')
+      await ui.press({ key: 'tab-lines' })
+      expect((await ui.find({ type: 'Text', text: /No other lines/ }))?.text).toBe('No other lines: forks, rewinds and merges show here.')
+      await ui.press({ key: 'tab-history' })
+      expect(await ui.find({ type: 'Text', text: /Nothing recorded/ })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+
+  test('a turn opens on a press, and its button puts a ready prompt in the prompt box', async ($, on) => {
+    const filled: string[] = []
+    // git holding one turn: the line's tip, its log, and the turn file
+    const at = new Date().toISOString()
+    world(on, [], {}, args => {
+      if (args[0] === 'rev-parse' && String(args[3]).startsWith('refs/heads/session/')) return 'c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe'
+      if (args[0] === 'log' && args.includes('-n60')) return `\0c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe\x01turn 13: Run the tests\x01${at}\x01p\x01Turn-Id: t13\nTools: Bash\nCost: 0.04\n\x02\nturns/0013-t13.md`
+      if (args[0] === 'log' && args.includes('5000')) return 'turn 13: Run the tests\x01Turn-Id: t13\x00'
+      if (args[0] === 'show' && String(args[1]).endsWith(':turns/0013-t13.md')) return '---\nfiles: ["store/ledger.go"]\n---\n## Prompt\nRun the tests.\n\n## Answer\nOne fails: TestTransfer.\n'
+      if (args[0] === 'show') return null as unknown as undefined
+      return undefined
+    })
+    on('prompt.fill', ($, e) => {
+      filled.push(e.text)
+      return { isFilled: true }
+    })
+    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: false })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect((await ui.find({ key: 'turn-c0ffee1' }))?.text).toMatch(/^● 13 {2}now {2}Run the tests$/)
+    expect((await ui.find({ type: 'Text', text: /Bash · \$0\.04/ }))?.text).toBe('│          Bash · $0.04')
+    await ui.press({ key: 'turn-c0ffee1' })
+    expect((await ui.find({ key: 'turn-c0ffee1' }))?.text).toMatch(/^▾ 13/)
+    expect((await ui.find({ type: 'Text', text: /answer:/ }))?.text).toBe('  answer: One fails: TestTransfer.')
+    await ui.press({ key: 'full-c0ffee1' })
+    expect(filled).toEqual(["Show me turn 13 of this conversation in full with convo's turn tool."])
+    await ui.press({ key: 'turn-c0ffee1' })
+    expect((await ui.find({ key: 'turn-c0ffee1' }))?.text).toMatch(/^● 13/)
+    expect(await ui.find({ type: 'Text', text: /answer:/ })).toBeUndefined()
+    await ui.unmount()
   })
 
   test('opens with an interactive session', async ($, on) => {

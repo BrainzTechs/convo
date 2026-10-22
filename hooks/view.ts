@@ -10,6 +10,7 @@ import { parseRecords } from './checkpoint.ts'
 import { refs } from './turns.ts'
 import { git, revOf } from './git.ts'
 import { listBranches, turnCount } from './tools.ts'
+import { buildTimeline } from './timeline.ts'
 
 /** The most other lines the pane lists, newest first. */
 const LINES_SHOWN = 12
@@ -119,7 +120,8 @@ export async function buildView(io: Io, sid: string): Promise<ConvoView> {
   const ag = await git(io, ['for-each-ref', '--format=%(objectname)', agentRefs])
   const agMerged = await git(io, ['for-each-ref', '--merged', tip, '--format=%(objectname)', agentRefs])
   const count = (r: { ok: boolean; out: string }): number => (r.ok && r.out ? r.out.split('\n').length : 0)
-  return { ...view, ...line, questions, tasks: open.length - questions.length, lines, agents: { all: count(ag), merged: count(agMerged) }, others }
+  const history = await buildTimeline(io, tip).catch(() => [])
+  return { ...view, ...line, questions, tasks: open.length - questions.length, lines, agents: { all: count(ag), merged: count(agMerged) }, others, tip, history }
 }
 
 /** A row of the pane: its text and how it reads. */
