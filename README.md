@@ -180,6 +180,25 @@ back. "What Claude works from" is the newest compaction on this line: after
 it, Claude sees that keyframe (or Claude Code's own summary) and the turns
 since, not the turns before.
 
+Below the lines, the pane keeps a token ledger for the window:
+
+```
+Tokens · this window · $0.06
+  167k in over 2 requests, 153 out
+  every request carries 25k of setup: skills 9.8k, custom agents 6.5k, system tools 4.2k
+  conversation now 59k; tool output added 61 (Bash 61)
+  cache: 98% read from cache · no misses
+```
+
+It counts every model request as Claude Code reports it (main thread and
+subagents), takes the setup and conversation sizes from `/context`'s own
+breakdown (counted locally, no tokens spent), and the cost from the status
+line, this window's share only. A request that re-caches what the one before
+it had cached is a cache miss: the pane names its turn, its size and the
+likely cause (a pause long enough for the cache to expire, another model, or
+a change at the start of the request). The re-cache after a compaction, and
+the first request of a window, are expected and counted apart.
+
 To look at the history yourself, use git directly, for example:
 
 ```bash
@@ -281,6 +300,7 @@ afterwards.
 | `session.ts` | Session switches and native compactions noticed |
 | `history.ts`, `tools.ts` | recall, turn, branches, merge and pane |
 | `view.ts` | What the pane beside the chat shows, built from git, and its rows (`types/index.d.ts` declares it) |
+| `ledger.ts` | The token ledger and cache misses the pane shows |
 | `permission.ts` | Asking before reading beyond this conversation |
 | `redact.ts` | Masking secrets |
 

@@ -289,6 +289,32 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('it reads as rewound, back in through a merge, not as forked from', text.includes('rewound after turn 2 · 1 turn · back in through a merge') && !text.includes('forked from'), text)
   },
 
+  async ledger(dir, check) {
+    const w = await world(dir)
+    await w.start(A)
+    await w.turn(FIRST, 'Noted.')
+    await w.turn('Run the tests.', 'All pass.', { tools: [{ name: 'Bash', input: { command: 'go test ./...' }, output: 'ok  \n'.repeat(700) }] })
+    await w.turn('Read the config.', 'Port 8080.', { tools: [{ name: 'Read', input: { file_path: 'config.toml' }, output: 'port = 8080\n'.repeat(20) }] })
+    // A request that re-caches the whole context on another model: a miss
+    w.nextUsage = { read: 0, write: 50_000, model: 'sonnet' }
+    await w.turn('Carry on.', 'Done.')
+    await w.turn('Ask a subagent.', 'It says 391.', { agents: [{ id: 'agentledg1', prompt: 'What is 17 times 23?', answer: '391' }] })
+    await w.timers()
+    await w.compact('manual')
+    await w.turn('Next?', 'The handler.')
+    const l = w.ledger()
+    check('every model request is counted, the subagent\'s too', l?.requests === 10, JSON.stringify(l?.requests))
+    check('the model change is a miss, named with its turn', l?.misses?.length === 1 && l.misses[0].turn === 4 && l.misses[0].why === 'the model changed to sonnet' && l.misses[0].tokens === 50_000, JSON.stringify(l?.misses))
+    check('the re-cache after the compaction is expected, not a miss', l?.expected === 1, JSON.stringify(l?.expected))
+    check('tool output is counted by tool', l?.toolOutput?.Bash === Math.ceil(('ok  \n'.repeat(700)).trim().length / 3.5) && l.toolOutput.Read > 0, JSON.stringify(l?.toolOutput))
+    check('the subagent ran once, on haiku', l?.agents?.runs === 1 && l.agents.models.join() === 'haiku', JSON.stringify(l?.agents))
+    check('setup, conversation and cost come from Claude Code', l?.setup?.total === 10_000 && typeof l.conversation === 'number' && typeof l.costUsd === 'number', JSON.stringify({ setup: l?.setup, conversation: l?.conversation, cost: l?.costUsd }))
+    const { paneRows } = await import('../../hooks/view.ts')
+    const { ledgerRows } = await import('../../hooks/ledger.ts')
+    const text = paneRows(w.view(), 120, ledgerRows(l, 120)).map((r: { text: string }) => r.text).join('\n')
+    check('the pane shows the tokens and the miss', text.includes('Tokens · this window') && text.includes('turn 4: 50k re-cached, the model changed to sonnet'), text)
+  },
+
   async subagent(dir, check) {
     const w = await world(dir)
     await w.start(A)

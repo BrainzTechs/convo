@@ -51,6 +51,9 @@ export const S = {
 
   /** Goes up whenever this process moves the history (a commit, a merge, a session switch): the pane redraws on it. */
   moved: 0,
+
+  /** When the conversation was last compacted: the requests after it re-cache, as expected. */
+  compactedAt: undefined as number | undefined,
 }
 
 /** Running subagents' rows, each until its turn ends. */

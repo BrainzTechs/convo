@@ -18,7 +18,7 @@
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 import type { Io } from './io.ts'
 import { messageTokens, tailStart, tokensOf, turnStarts } from './checkpoint.ts'
-import { KEPT_DOORS, assembleTurn, refs, toBlocks, turnDir } from './turns.ts'
+import { KEPT_DOORS, assembleTurn, refs, toBlocks, turnDir, type Row } from './turns.ts'
 import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, startText } from './state.ts'
 import { transcriptOf, transcripts } from './rows.ts'
 import { ensureRepo, projectRoot } from './repo.ts'
@@ -28,6 +28,8 @@ import { permit } from './permission.ts'
 import { buildCheckpoint, buildOwed } from './keyframes.ts'
 import { branchList, mergeBranch, readTurn, recall, registerTools } from './tools.ts'
 import { buildView, emptyView, paneRows, type PaneRow } from './view.ts'
+import { addAgentRun, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
+import type { ConvoLedger } from '../types/index.d.ts'
 
 /**
  * The engine as convo's modules use it. Claude Code follows `$` only into
@@ -79,10 +81,63 @@ async function publish($: EngineInterface, look = false): Promise<void> {
     if (published.moved === S.moved && published.sid === S.sid && published.refs === refsNow) return
     const at = { moved: S.moved, sid: S.sid }
     const view = await buildView(io, S.sid)
+    lastTurns = view.turns
+    turnsSince = 0
     await $.state.set(VIEW, view)
     published = { ...at, refs: look ? refsNow : published.refs }
   } catch (err) {
     $.ui.log(`convo: the pane's view was not rebuilt: ${String(err).slice(0, 200)}`, { to: 'debug' })
+  }
+}
+
+// ── The token ledger ─────────────────────────────────────────────────
+const LEDGER = { plugin: 'convo', key: 'ledger' } as const
+/** This window's ledger; kept in session state too, so a reload of convo picks it up. */
+let ledger: ConvoLedger | undefined
+/** The number the main turn under way will get, for naming a cache miss. */
+let turnNow: number | undefined
+/** Turns on this line as the pane last counted them, and main turns finished since (still on their way to git). */
+let lastTurns = 0
+let turnsSince = 0
+
+/** Writes the ledger where the pane reads it. */
+async function saveLedger($: EngineInterface): Promise<void> {
+  if (ledger) await $.state.set(LEDGER, ledger)
+}
+
+/** Tool output a turn's rows hold, by tool, in estimated tokens (3.5 characters a token). */
+function toolOutputOf(rows: readonly Row[]): Record<string, number> {
+  const names = new Map<string, string>()
+  for (const r of rows) for (const b of r.blocks) if (b.type === 'tool_use') names.set(b.id, b.name)
+  const out: Record<string, number> = {}
+  for (const r of rows) {
+    for (const b of r.blocks) {
+      if (b.type !== 'tool_result') continue
+      const name = names.get(b.toolUseId) ?? 'other'
+      out[name] = (out[name] ?? 0) + Math.ceil(b.text.length / 3.5)
+    }
+  }
+  return out
+}
+
+/**
+ * A finished turn in the ledger: the tool output it added, a subagent's run,
+ * and for the main thread the setup and conversation sizes /context reports
+ * (counted locally, no tokens spent) and the status line's cost.
+ */
+async function countTurn($: EngineInterface, agentId: string | undefined, rows: readonly Row[]): Promise<void> {
+  try {
+    let l = addToolOutput(ledger ?? emptyLedger(Date.now()), toolOutputOf(rows))
+    if (agentId) l = addAgentRun(l)
+    else {
+      turnsSince += 1
+      const usage = await $.session.usage({ breakdown: 'summary' })
+      l = { ...l, ...readBreakdown(usage.context.breakdown?.categories ?? []), ...(usage.cost ? { costUsd: usage.cost.usd } : {}) }
+    }
+    ledger = l
+    await saveLedger($)
+  } catch (err) {
+    $.ui.log(`convo: the ledger missed a turn: ${String(err).slice(0, 200)}`, { to: 'debug' })
   }
 }
 
@@ -125,6 +180,13 @@ export const register: Register = on => {
       $.clock.every(30_000, () => publish($, true))
     }
     await publish($, true)
+    // The ledger counts this window; a reload of convo carries on with what session state kept
+    if (!ledger) {
+      const kept = (await $.state.get(LEDGER)).value
+      // A new window counts from the session's cost as it stands, so a resumed session's earlier spend is not its own
+      ledger = kept ?? { ...emptyLedger(Date.now()), costBase: (await $.session.usage().catch(() => undefined))?.cost?.usd ?? 0 }
+    }
+    await saveLedger($)
     // Beside the chat on a wide enough screen, unless the person closed it; asking Claude brings it back
     if (e.isInteractive && (await $.store.get('pane-closed')) !== true) void $.ui.open({ id: PANE, title: 'convo' })
     return next(e)
@@ -138,7 +200,9 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const got = await $.state.get(VIEW)
-    const rows = paneRows(got.value, Math.max(20, e.props.bodyColumns))
+    const tokens = await $.state.get(LEDGER)
+    const width = Math.max(20, e.props.bodyColumns)
+    const rows = paneRows(got.value, width, ledgerRows(tokens.value, width))
     // Drawn with h() rather than JSX, so this module stays a .ts file Node can run in the tests
     return h(Box, { flexDirection: 'column' }, ...rows.map(r => h(Text, toneOf(r.tone), r.text || ' '))) as RenderElement
   })
@@ -161,6 +225,7 @@ export const register: Register = on => {
         // The summary row is the user-role one; the boundary notice carries no text worth keeping
         const summary = blocks.flatMap(b => (b.type === 'text' ? [b.text] : [])).join('\n')
         if (e.message.type === 'user' && summary && !e.agentId) {
+          S.compactedAt = Date.now()
           await recordCompaction(ioOf($), summary)
           // Held back: start the keyframe now, so the next prompt need not wait for it
           if (S.keyframeOwed) $.clock.after(0, () => buildOwed(ioOf($)))
@@ -216,6 +281,7 @@ export const register: Register = on => {
     // No background summary is paid for that the keyframe would discard
     if (e.trigger === 'precompute') return { skip: 'convo builds a keyframe when the conversation compacts' }
     S.compactHookRan = true
+    S.compactedAt = Date.now()
     // Each way back to native says why in the debug log (claude --debug), so a fallback is never silent
     const native = (why: string): ReturnType<typeof next> => {
       $.ui.log(`convo: compacting natively: ${why}`, { to: 'debug' })
@@ -304,7 +370,25 @@ export const register: Register = on => {
   })
 
   // ── Turns ────────────────────────────────────────────────────────────
+  // Each model request: its usage goes in the ledger, and a request that re-caches what was cached is a miss.
+  // A streaming event: the hook passes the response through untouched and reads its usage at the end
+  on('turn.step', async function* ($, e, next) {
+    const response = yield* next(e)
+    try {
+      const u = response.usage
+      if (u) {
+        ledger = addStep(ledger ?? emptyLedger(Date.now()), { loop: e.agentId ?? 'main', model: u.model || e.model, at: Date.now(), uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens }, { compactedAt: S.compactedAt, turn: e.agentId ? undefined : turnNow })
+        await saveLedger($)
+      }
+    } catch {
+      // Counting never gets in the way of the conversation
+    }
+    return response
+  })
+
   on('turn.start', async ($, e, next) => {
+    // The number this main turn will get: one past what this line holds
+    if (!e.agentId) turnNow = lastTurns + turnsSince + 1
     // A changed session id means /clear, /branch, a fork or a rewind: a new branch
     await useSession(ioOf($), await $.session.id())
     startText.set(e.turnId, e.text)
@@ -322,6 +406,7 @@ export const register: Register = on => {
     try {
       const agentId = e.agentId
       const rows = agentId ? (agentRows.get(agentId) ?? []) : S.mainRows
+      await countTurn($, agentId, rows)
       if (agentId) agentRows.delete(agentId)
       else S.mainRows = []
       // A subagent's turn belongs to the session that spawned it, whatever the session is now

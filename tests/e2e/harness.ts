@@ -58,6 +58,11 @@ export class World {
     mkdirSync(o.cwd, { recursive: true })
   }
 
+  /** The context the model was last sent, in tokens, by loop: what the next request reads from the cache. */
+  private cached = new Map<string, number>()
+  /** Usage the next request reports in place of the usual, once (to stage a cache miss). */
+  nextUsage?: { read?: number; write?: number; model?: string }
+
   /** The `on` a hooks module's register() takes. */
   on = (event: string, a: any, b?: any) => {
     const hook: Hook = typeof a === 'function' ? { event, fn: a } : { event, matcher: a, fn: b }
@@ -106,6 +111,34 @@ export class World {
     return call(0, e)
   }
 
+  /** Raises a streaming event (turn.step): each hook is an async generator over the one beneath. */
+  async fireStream(event: string, e: any, core: (e: any) => any): Promise<any> {
+    const chain = this.hooks.filter(h => h.event === event && matches(h.matcher, e))
+    const call = (i: number, ev: any): AsyncGenerator<unknown, any> => {
+      const h = chain[i]
+      if (!h) return (async function* () { return core(ev) })()
+      return h.fn(this.$, ev, (x: any) => call(i + 1, x))
+    }
+    const gen = call(0, e)
+    for (;;) {
+      const r = await gen.next()
+      if (r.done) return r.value
+    }
+  }
+
+  /** One model request, as Claude Code reports it: the cached context read back, the new part written. */
+  private async request(turnId: string, index: number, newTokens: number, agentId?: string): Promise<void> {
+    const loop = agentId ?? 'main'
+    const before = this.cached.get(loop) ?? 0
+    const staged = this.nextUsage
+    this.nextUsage = undefined
+    const read = staged?.read ?? before
+    const write = staged?.write ?? (before ? newTokens : 10_000 + newTokens)
+    const model = staged?.model ?? (agentId ? 'haiku' : 'opus')
+    this.cached.set(loop, read + write)
+    await this.fireStream('turn.step', { turnId, index, model, messageCount: index + 1, ...(agentId ? { agentId } : {}) }, () => ({ turnId, index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { input_tokens: 2, output_tokens: 50, cache_read_input_tokens: read, cache_creation_input_tokens: write, model } }))
+  }
+
   /** The engine interface, as much of it as convo calls. */
   $: any = {
     process: {
@@ -136,6 +169,16 @@ export class World {
     session: {
       id: async () => this.sid,
       messages: async () => this.messages,
+      usage: async () => ({
+        startedAt: 0,
+        context: { tokens: this.cached.get('main') ?? 0, window: 1_000_000, breakdown: { categories: [
+          { name: 'System prompt', tokens: 3000, kind: 'used' },
+          { name: 'System tools', tokens: 7000, kind: 'used' },
+          { name: 'Messages', tokens: Math.max(0, (this.cached.get('main') ?? 0) - 10_000), kind: 'used' },
+        ] } },
+        rateLimits: [],
+        cost: { usd: 0.01 * (this.cached.get('main') ?? 0) / 1000 },
+      }),
     },
     store: {
       get: async (k: string) => this.store.get(k),
@@ -189,6 +232,11 @@ export class World {
     return this.state.get('convo/view')
   }
 
+  /** The token ledger convo keeps for its pane. */
+  ledger(): any {
+    return this.state.get('convo/ledger')
+  }
+
   /** Writes a transcript row the way Claude Code does, chained to the session's last row (or to `parent`). */
   private row(type: 'user' | 'assistant', content: Block[], parent?: string | null): string {
     const uuid = randomUUID()
@@ -218,8 +266,12 @@ export class World {
     }
     await append('prompt', 'user', [{ type: 'text', text: prompt }], o.parent)
     this.messages.push({ role: 'user', text: prompt, toolUses: [] })
+    let index = 0
+    let fresh = Math.ceil(prompt.length / 3.5)
     for (const t of o.tools ?? []) {
       const id = `toolu_${randomUUID().slice(0, 8)}`
+      await this.request(turnId, index++, fresh)
+      fresh = Math.ceil(t.output.length / 3.5) + 20
       await append('response', 'assistant', [{ type: 'tool_use', id, name: t.name, input: t.input }])
       await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: t.output }])
     }
@@ -227,13 +279,17 @@ export class World {
       const id = `toolu_${randomUUID().slice(0, 8)}`
       await append('response', 'assistant', [{ type: 'tool_use', id, name: 'Agent', input: { prompt: a.prompt } }])
       await this.fire('agent.spawn', { tool_use_id: id, subagentType: 'general-purpose', prompt: a.prompt }, () => ({ agentId: a.id }))
+      await this.request(turnId, index++, fresh)
+      fresh = Math.ceil(a.answer.length / 3.5) + 20
       const at = randomUUID()
       await this.fire('turn.start', { turnId: at, text: a.prompt, agentId: a.id }, () => ({}))
+      await this.request(at, 0, Math.ceil(a.prompt.length / 3.5), a.id)
       await append('prompt', 'user', [{ type: 'text', text: a.prompt }], undefined, a.id)
       await append('response', 'assistant', [{ type: 'text', text: a.answer }], undefined, a.id)
       await this.fire('turn.complete', { turnId: at, agentId: a.id, answer: a.answer, reason: 'answer', durationMs: 5 }, () => ({}))
       await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: a.answer }])
     }
+    await this.request(turnId, index++, fresh)
     await append('response', 'assistant', [{ type: 'text', text: answer }])
     this.messages.push({ role: 'assistant', text: answer, toolUses: [] })
     await this.fire('turn.complete', { turnId, answer, reason: 'answer', durationMs: 10 }, () => ({}))
@@ -265,6 +321,9 @@ export class World {
     const uuid = this.row('user', [{ type: 'text', text }], null)
     await this.fire('session.append', { door: 'compaction', uuid, message: { type: 'user', content: [{ type: 'text', text }] } }, () => ({}))
     this.messages = (r.messages ?? []).map((m: Message) => ({ role: m.role, text: m.text, toolUses: m.toolUses ?? [] }))
+    // The next request sends the smaller conversation, cached afresh
+    this.cached.set('main', 0)
+    this.nextUsage = { read: 0, write: 8000 }
     return r
   }
 

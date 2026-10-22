@@ -150,8 +150,8 @@ export function wrapRow(text: string, width: number): string[] {
   return out
 }
 
-/** The pane's rows for `view`, each at most `width` columns (a long one wraps). */
-export function paneRows(view: ConvoView | undefined, width: number): PaneRow[] {
+/** The pane's rows for `view`, each at most `width` columns (a long one wraps); `more` goes before the closing hint. */
+export function paneRows(view: ConvoView | undefined, width: number, more: readonly PaneRow[] = []): PaneRow[] {
   const rows: PaneRow[] = []
   const add = (text: string, tone?: PaneRow['tone']): void => {
     for (const t of wrapRow(text, width)) rows.push({ text: t, ...(tone ? { tone } : {}) })
@@ -203,6 +203,7 @@ export function paneRows(view: ConvoView | undefined, width: number): PaneRow[] 
   for (const m of view.merges.filter(m => !view.lines.some(l => l.name === m.from))) add(`  merged ${short(m.from)} after turn ${m.afterTurn}${m.conflicts ? ` · ${plural(m.conflicts, 'question')}${view.questions.length ? '' : ' settled'}` : ''}`, 'good')
   if (view.agents.all) add(`  ${plural(view.agents.all, 'subagent')}, ${view.agents.merged} merged in`, 'dim')
   if (view.others) add(`${plural(view.others, 'other conversation')} in this project.`, 'dim')
+  rows.push(...more)
   add('')
   add('Ask Claude to recall, list or merge any of these.', 'dim')
   return rows

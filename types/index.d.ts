@@ -1,4 +1,4 @@
-// convo's session state: what its pane beside the chat shows.
+// convo's session state: what its pane beside the chat shows, and the token ledger.
 
 /** One other line of this conversation, as the pane lists it. */
 export type ConvoLine = {
@@ -47,8 +47,51 @@ export type ConvoView = {
   at: string
 }
 
+/** A prompt-cache miss: a request that re-cached what the last one had cached. */
+export type ConvoMiss = {
+  at: number
+  /** 'main', or the subagent's id. */
+  loop: string
+  /** The turn of this conversation it happened in, when known. */
+  turn?: number
+  /** Tokens written to the cache again. */
+  tokens: number
+  /** The likely cause, in words. */
+  why: string
+}
+
+/** Where this window's tokens went, request by request, as the model's usage reported them. */
+export type ConvoLedger = {
+  /** When counting began (this window, or the reload that started it). */
+  since: number
+  requests: number
+  /** Input tokens: not cached, read from the cache, written to the cache; and output tokens. */
+  uncached: number
+  read: number
+  write: number
+  output: number
+  misses: ConvoMiss[]
+  missTokens?: number
+  /** Re-caches that followed a compaction: expected, so counted but not listed. */
+  expected: number
+  agents: { runs: number; tokens: number; models: string[] }
+  /** Tool output finished turns added to the context, by tool, in estimated tokens. */
+  toolOutput: Record<string, number>
+  /** What every request carries before the conversation (tools, skills, system prompt), from /context's breakdown. */
+  setup?: { total: number; parts: [string, number][] }
+  /** The conversation's own tokens, from the same breakdown. */
+  conversation?: number
+  /** The session's cost as the status line has it now, and what it was when this window started counting. */
+  costUsd?: number
+  costBase?: number
+  /** Tokens the window's first request cached: a new window, or a resumed session, starts with a cold cache. */
+  warmup?: number
+  /** Each loop's last request: when, on which model, and its whole input. */
+  last: Record<string, { at: number; model: string; input: number }>
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    convo: { view: ConvoView }
+    convo: { view: ConvoView; ledger: ConvoLedger }
   }
 }
