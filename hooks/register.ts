@@ -31,8 +31,10 @@ import { permit } from './permission.ts'
 import { buildCheckpoint, buildOwed } from './keyframes.ts'
 import { branchList, mergeBranch, readTurn, recall, registerTools } from './tools.ts'
 import { buildView, emptyView, paneRows, type PaneRow } from './view.ts'
-import { addAgentRun, addClearing, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
+import { addAgentRun, addClearing, addCondensed, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
 import { applyClearing, planClearing, shouldClear } from './clearing.ts'
+import { condense } from './condense.ts'
+import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import type { ConvoLedger } from '../types/index.d.ts'
 
@@ -142,7 +144,57 @@ let toolSearchSeen = false
 let toolRate: number | undefined
 
 /** The settings (/config, under convo), as the module was loaded with them. */
-const settings = { compactAt: 0, clearOldOutput: true, holdBackTools: true, keepTools: new Set<string>() }
+const settings = { compactAt: 0, clearOldOutput: true, holdBackTools: true, keepTools: new Set<string>(), condenseOutput: true, neverCondense: new Set<string>() }
+
+// ── Condensing tool output as it arrives ─────────────────────────────
+// A long log reaches Claude as its errors and failures, the rest counted
+// (condense.ts says how). The original is recorded for git as always, and kept
+// beside it (outputs/<tool_use_id>.txt) so the turn tool reads it back at once.
+
+/** Where condensed results' originals wait for the turn tool. */
+const outputsDir = (): string => `${S.root}/outputs`
+
+/** A tool result's text, when it is text alone; undefined when it holds an image or a document. */
+function resultTextOf(content: unknown): string | undefined {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return undefined
+  const texts: string[] = []
+  for (const c of content as { type?: unknown; text?: unknown }[]) {
+    if (c?.type !== 'text') return undefined
+    texts.push(String(c.text ?? ''))
+  }
+  return texts.join('\n')
+}
+
+/**
+ * A tool-result row with its long results condensed, or undefined to append
+ * it as it came. The tool and its input come from the loop's response rows.
+ */
+async function condensedRow(io: Io, agentId: string | undefined, content: readonly { type: string; [k: string]: unknown }[]): Promise<{ type: string; [k: string]: unknown }[] | undefined> {
+  const calls = new Map<string, { name: string; input: unknown }>()
+  for (const r of rowsFor(agentId)) for (const b of r.blocks) if (b.type === 'tool_use') calls.set(b.id, { name: b.name, input: b.input })
+  let changed = false
+  const out: { type: string; [k: string]: unknown }[] = []
+  for (const b of content) {
+    const id = typeof b.tool_use_id === 'string' ? b.tool_use_id : ''
+    const call = calls.get(id)
+    const text = b.type === 'tool_result' && call ? resultTextOf(b.content) : undefined
+    const c = text !== undefined && call ? condense({ tool: call.name, input: call.input, text, id, never: settings.neverCondense }) : undefined
+    if (!c || text === undefined || !/^[\w-]{6,}$/.test(id)) {
+      out.push(b)
+      continue
+    }
+    await io.fs.write(`${outputsDir()}/${id}.txt`, mask(text))
+    condensedNow.outputs += 1
+    condensedNow.before += Math.ceil(c.before / 3.5)
+    condensedNow.after += Math.ceil(c.after / 3.5)
+    out.push({ ...b, content: c.text })
+    changed = true
+  }
+  return changed ? out : undefined
+}
+/** Condensed since the ledger last counted: added to it as each turn ends. */
+const condensedNow = { outputs: 0, before: 0, after: 0 }
 /** This session's use of tools, skills and agent types, and the session it belongs to. */
 let usage: Usage = emptyUsage(Date.now())
 let usageSid = ''
@@ -170,6 +222,10 @@ let ioOfStatic: Io
 async function countTurn($: EngineInterface, agentId: string | undefined, rows: readonly Row[]): Promise<void> {
   try {
     let l = addToolOutput(ledger ?? emptyLedger(Date.now()), toolOutputOf(rows))
+    if (condensedNow.outputs) {
+      l = addCondensed(l, condensedNow)
+      condensedNow.outputs = condensedNow.before = condensedNow.after = 0
+    }
     const now = Date.now()
     if (S.gitOk) {
       usage = addUsage(await usageFor(S.sid), rows, now)
@@ -303,7 +359,7 @@ async function compactEarly($: EngineInterface): Promise<void> {
 }
 
 // ── The context tool: what the manager does, and changing its settings ─
-const SETTINGS = ['compactAt', 'clearOldOutput', 'holdBackTools', 'keepTools'] as const
+const SETTINGS = ['compactAt', 'clearOldOutput', 'holdBackTools', 'keepTools', 'condenseOutput', 'neverCondense'] as const
 type SettingKey = (typeof SETTINGS)[number]
 
 /** The settings as they stand, in a few lines. */
@@ -313,6 +369,8 @@ function settingsText(): string {
     `clearOldOutput: ${settings.clearOldOutput ? 'on' : 'off'}`,
     `holdBackTools: ${settings.holdBackTools ? 'on' : 'off'}`,
     `keepTools: ${settings.keepTools.size ? [...settings.keepTools].join(', ') : '(none)'}`,
+    `condenseOutput: ${settings.condenseOutput ? 'on' : 'off'}`,
+    `neverCondense: ${settings.neverCondense.size ? [...settings.neverCondense].join(', ') : '(none)'}`,
   ].join('\n')
 }
 
@@ -324,7 +382,7 @@ function settingValue(key: SettingKey, v: unknown): { value: number | boolean | 
     if (n > 0 && n < COMPACT_AT_MIN) return { why: `compactAt is ${COMPACT_AT_MIN} tokens at least (or 0 to turn it off)` }
     return { value: Math.round(n) }
   }
-  if (key === 'keepTools') return typeof v === 'string' ? { value: [...parseKeep(v)].join(', ') } : { why: 'keepTools takes tool names, separated by commas' }
+  if (key === 'keepTools' || key === 'neverCondense') return typeof v === 'string' ? { value: [...parseKeep(v)].join(', ') } : { why: `${key} takes names, separated by commas` }
   return typeof v === 'boolean' ? { value: v } : { why: `${key} takes true or false` }
 }
 
@@ -384,6 +442,8 @@ export const register: Register = (on, options) => {
   settings.clearOldOutput = o.clearOldOutput !== false
   settings.holdBackTools = o.holdBackTools !== false
   settings.keepTools = parseKeep(o.keepTools)
+  settings.condenseOutput = o.condenseOutput !== false
+  settings.neverCondense = parseKeep(o.neverCondense)
 
   on('session.start', async ($, e, next) => {
     const io = ioOf($)
@@ -415,6 +475,8 @@ export const register: Register = (on, options) => {
       $.clock.after(5000, () => adoptOrphans(io))
       $.clock.every(300_000, () => adoptOrphans(io))
       await registerTools(io)
+      // Originals of condensed output are kept a month; git keeps them for good
+      void io.process.run(['find', `${S.root}/outputs`, '-type', 'f', '-mtime', '+30', '-delete'], { timeoutMs: 10_000 }).catch(() => undefined)
       // What this project used, for the tools held back when Claude Code first lists them (once a process)
       if (settings.holdBackTools) {
         try {
@@ -493,7 +555,17 @@ export const register: Register = (on, options) => {
 
   // ── Rows: buffered per conversation until their turn ends ────────────
   on('session.append', { door: ['prompt', 'response', 'tool-result', 'command', 'delivery', 'compaction'] }, async ($, e, next) => {
-    const result = await next(e)
+    // A long tool result reaches Claude condensed; what is recorded below, for git, is the original
+    let sent = e
+    if (settings.condenseOutput && S.gitOk && e.door === 'tool-result' && !clearing) {
+      try {
+        const content = await condensedRow(ioOf($), e.agentId, e.message.content as { type: string; [k: string]: unknown }[])
+        if (content) sent = { ...e, message: { ...e.message, content: content as typeof e.message.content } }
+      } catch (err) {
+        $.ui.log(`convo: tool output not condensed: ${String(err).slice(0, 200)}`, { to: 'debug' })
+      }
+    }
+    const result = await next(sent)
     // A clearing puts the conversation back with stubs in it: its rows are no turn's, and no summary to record
     if (clearing && !e.agentId) return result
     try {

@@ -88,6 +88,12 @@ export function addClearing(l: ConvoLedger, c: { outputs: number; tokens: number
   return { ...l, cleared: { times: was.times + 1, outputs: was.outputs + c.outputs, tokens: was.tokens + c.tokens } }
 }
 
+/** Tool output condensed as it arrived, in estimated tokens before and after. */
+export function addCondensed(l: ConvoLedger, c: { outputs: number; before: number; after: number }): ConvoLedger {
+  const was = l.condensed ?? { outputs: 0, before: 0, after: 0 }
+  return { ...l, condensed: { outputs: was.outputs + c.outputs, before: was.before + c.before, after: was.after + c.after } }
+}
+
 /** Tool output a finished turn added to the context, by tool, in estimated tokens. */
 export function addToolOutput(l: ConvoLedger, byTool: Readonly<Record<string, number>>): ConvoLedger {
   const toolOutput = { ...l.toolOutput }
@@ -155,6 +161,10 @@ export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[]
     const conv = l.conversation ? `conversation now ${k(l.conversation)}` : ''
     const out = toolTotal ? `tool output added ${k(toolTotal)} (${tools.slice(0, 3).map(([t, n]) => `${t} ${k(n)}`).join(', ')})` : ''
     add(`  ${[conv, out].filter(Boolean).join('; ')}`, 'dim')
+  }
+  if (l.condensed?.outputs) {
+    const c = l.condensed
+    add(`  condensed ${k(c.before - c.after)} of tool output as it arrived (${c.outputs} output${c.outputs === 1 ? '' : 's'}, ${Math.round((100 * (c.before - c.after)) / Math.max(1, c.before))}% less); git keeps every word`, 'good')
   }
   if (l.cleared) {
     const c = l.cleared

@@ -66,7 +66,8 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
   },
 
   async clearing(dir, check) {
-    const w = await world(dir)
+    // Condensing would leave little to clear: this scenario is about clearing what reached the context whole
+    const w = await world(dir, {}, { condenseOutput: false })
     await w.start(A, true)
     await w.turn(FIRST, 'Noted.')
     await w.turn('Run the tests.', 'All pass.', { tools: [{ name: 'Bash', input: { command: 'go test ./...' }, output: 'ok  ledgerd/store 0.41s\n'.repeat(1000) }] })
@@ -210,6 +211,34 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('with the setting off, nothing is held back', [...off.described.values()].every(d => !d.isDeferred))
     const noAsk = await (await world(join(dir, 'n'), { setup })).tool('context', { clearOldOutput: false })
     check('with nobody to ask, nothing changes', (noAsk.result ?? '').includes('nobody could be asked') || (noAsk.result ?? '').includes('off in this session'), noAsk.result)
+  },
+
+  async condense(dir, check) {
+    const w = await world(dir)
+    await w.start(A)
+    const goTest = [...Array.from({ length: 300 }, (_, i) => `=== RUN   TestLedger${i}\n--- PASS: TestLedger${i} (0.00s)`), '=== RUN   TestTransfer', '    ledger_test.go:88: expected balance 100, got 90', '--- FAIL: TestTransfer (0.01s)', 'FAIL\tledgerd/store\t0.412s'].join('\n')
+    await w.turn('Run the tests.', 'One fails: TestTransfer.', { tools: [{ name: 'Bash', input: { command: 'go test ./...' }, output: goTest }, { name: 'Bash', input: { command: 'cat store/ledger.go' }, output: 'package store\n'.repeat(400) }] })
+    const [test, cat] = w.messages.flatMap(m => m.toolResults ?? [])
+    check('the test run reaches Claude as its failure, the passing lines counted', (test?.text ?? '').includes('--- FAIL: TestTransfer') && (test?.text ?? '').includes('… 601 passing lines left out') && !(test?.text ?? '').includes('TestLedger17') && (test?.text.length ?? 0) < 600, test?.text.slice(0, 300))
+    check('a file printed with cat reaches Claude whole', cat?.text === 'package store\n'.repeat(400))
+    const id = /output "([^"]+)"/.exec(test?.text ?? '')?.[1] ?? ''
+    const back = await w.tool('turn', { output: id })
+    check('the turn tool reads the original back at once, before the turn reaches git', back.result === goTest, (back.result ?? back.deny ?? '').slice(0, 200))
+    await w.timers()
+    const files = w.git('ls-tree', '-r', '--name-only', `session/${A}`)
+    const blob = files.split('\n').find(f => f.startsWith('blobs/')) ?? ''
+    check('git keeps the original word for word', !!blob && w.git('show', `session/${A}:${blob}`).includes('--- PASS: TestLedger17 (0.00s)'), files)
+    const l = w.ledger()
+    check('the ledger counts it', l?.condensed?.outputs === 1 && l.condensed.before > 4000 && l.condensed.after < 200, JSON.stringify(l?.condensed))
+    const text = (await import('../../hooks/ledger.ts')).ledgerRows(l, 200).map(r => r.text).join('\n')
+    check('the pane says so', /condensed \d+(\.\d)?k of tool output as it arrived \(1 output, \d+% less\); git keeps every word/.test(text), text)
+    check('an unknown output id is answered plainly', ((await w.tool('turn', { output: 'toolu_nothere' })).result ?? '').includes('no condensed output'))
+
+    // Commands the person keeps whole
+    const k = await world(join(dir, 'k'), {}, { neverCondense: 'go' })
+    await k.start(B)
+    await k.turn('Run the tests.', 'One fails.', { tools: [{ name: 'Bash', input: { command: 'go test ./...' }, output: goTest }] })
+    check('a command in neverCondense reaches Claude whole', k.messages.flatMap(m => m.toolResults ?? [])[0]?.text === goTest)
   },
 
   async fork(dir, check) {

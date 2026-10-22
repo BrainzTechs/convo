@@ -286,9 +286,15 @@ export class World {
     const turnId = randomUUID()
     await this.fire('prompt.submit', { text: prompt }, e => e)
     await this.fire('turn.start', { turnId, text: prompt }, () => ({}))
-    const append = async (door: string, type: 'user' | 'assistant', content: Block[], parent?: string | null, agentId?: string) => {
+    // As Claude Code does, what the hooks hand on is what the conversation keeps
+    const append = async (door: string, type: 'user' | 'assistant', content: Block[], parent?: string | null, agentId?: string): Promise<Block[]> => {
       const uuid = agentId ? randomUUID() : this.row(type, content, parent)
-      await this.fire('session.append', { door, uuid, agentId, message: { type, content } }, () => ({}))
+      let kept = content
+      await this.fire('session.append', { door, uuid, agentId, message: { type, content } }, ev => {
+        kept = ev.message.content
+        return { message: ev.message, uuid }
+      })
+      return kept
     }
     await append('prompt', 'user', [{ type: 'text', text: prompt }], o.parent)
     this.messages.push({ role: 'user', text: prompt, toolUses: [] })
@@ -297,11 +303,12 @@ export class World {
     for (const t of o.tools ?? []) {
       const id = `toolu_${randomUUID().slice(0, 8)}`
       await this.request(turnId, index++, fresh)
-      fresh = Math.ceil(t.output.length / 3.5) + 20
       await append('response', 'assistant', [{ type: 'tool_use', id, name: t.name, input: t.input }])
       this.messages.push({ role: 'assistant', text: '', toolUses: [{ tool_use_id: id, tool: t.name, input: t.input }] })
-      await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: t.output }])
-      this.messages.push({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: id, text: t.output, isError: false }] })
+      const kept = await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: t.output }])
+      const seen = String((kept[0] as { content?: unknown } | undefined)?.content ?? t.output)
+      this.messages.push({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: id, text: seen, isError: false }] })
+      fresh = Math.ceil(seen.length / 3.5) + 20
     }
     for (const a of o.agents ?? []) {
       const id = `toolu_${randomUUID().slice(0, 8)}`

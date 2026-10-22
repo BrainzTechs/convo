@@ -1,6 +1,6 @@
 {
   "name": "convo",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Keeps every Claude Code conversation as git history: one commit per turn, a branch per session and subagent, keyframes in place of compaction, merge and recall by asking, all local and redacted.",
   "author": {
     "name": "Brainztechs"
@@ -31,6 +31,18 @@
       "type": "string",
       "title": "Always keep these tools",
       "description": "Tool names never held back, separated by commas (for example: WebFetch, NotebookEdit).",
+      "default": ""
+    },
+    "condenseOutput": {
+      "type": "boolean",
+      "title": "Condense tool output",
+      "description": "A long test, build or log output reaches Claude as its errors and failures, with passing lines, repeats and progress counted; git keeps every word, and Claude can read the original back.",
+      "default": true
+    },
+    "neverCondense": {
+      "type": "string",
+      "title": "Never condense these",
+      "description": "Commands or tools whose output always reaches Claude whole, separated by commas (for example: make, docker).",
       "default": ""
     }
   }

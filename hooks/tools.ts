@@ -72,7 +72,17 @@ export async function recall(io: Io, input: { query?: unknown; limit?: unknown; 
 export const TURN_PAGE = 30_000
 
 /** The turn tool: one turn file in full, the tool output it stored as blobs inlined up to 8 KB each. */
-export async function readTurn(io: Io, input: { n?: unknown; branch?: unknown; path?: unknown; offset?: unknown }): Promise<string> {
+export async function readTurn(io: Io, input: { n?: unknown; branch?: unknown; path?: unknown; offset?: unknown; output?: unknown }): Promise<string> {
+  // A condensed result's original, by its tool call's id: kept the moment it arrived, before its turn reaches git
+  if (typeof input.output === 'string' && input.output.trim()) {
+    const id = input.output.trim()
+    const p = `${S.root}/outputs/${id}.txt`
+    if (!/^[\w-]{6,}$/.test(id) || !(await io.fs.exists(p))) return `turn: no condensed output ${JSON.stringify(id).slice(0, 80)} is kept here (they are kept a month; older ones are in the turn's own file, by number).`
+    const text = await io.fs.read(p)
+    const offset = typeof input.offset === 'number' && input.offset > 0 ? Math.trunc(input.offset) : 0
+    const more = offset + TURN_PAGE < text.length ? `\n\n… [${text.length - offset - TURN_PAGE} more chars: call turn again with this output and offset ${offset + TURN_PAGE}]` : ''
+    return text.slice(offset, offset + TURN_PAGE) + more
+  }
   await flushAll(io)
   const all = await listBranches(io)
   const p = typeof input.branch === 'string' && input.branch.trim() ? pickBranch(all, input.branch, refs.session(S.sid)) : { branch: all.find(b => b.ref === refs.session(S.sid)) }
@@ -260,8 +270,8 @@ export async function registerTools(io: Io): Promise<void> {
     {
       key: 'turn' as const,
       isDeferred: true,
-      description: 'Read one earlier turn of this conversation in full by its number (as recall and the keyframe show it), tool output included.',
-      inputSchema: { type: 'object', properties: { n: { type: 'number', description: 'Turn number on the branch' }, branch: { type: 'string', description: 'Another branch, by name or session id prefix' }, path: { type: 'string', description: 'The [path: …] recall printed, for a merged or subagent turn' }, offset: { type: 'number', description: 'Where to read on from, for a long turn' } } },
+      description: 'Read one earlier turn of this conversation in full by its number (as recall and the keyframe show it), tool output included; or, with output, the full original of a tool result convo condensed.',
+      inputSchema: { type: 'object', properties: { output: { type: 'string', description: 'The id a condensed result names, for its full original' }, n: { type: 'number', description: 'Turn number on the branch' }, branch: { type: 'string', description: 'Another branch, by name or session id prefix' }, path: { type: 'string', description: 'The [path: …] recall printed, for a merged or subagent turn' }, offset: { type: 'number', description: 'Where to read on from, for a long turn' } } },
     },
     {
       key: 'branches' as const,
@@ -273,8 +283,8 @@ export async function registerTools(io: Io): Promise<void> {
       key: 'context' as const,
       isDeferred: true,
       description:
-        "convo's context manager: what every request carries (the setup, and the tools convo holds back behind ToolSearch), what was cleared from the conversation, where it compacts, and the cache. Use it when the person asks about their context or tokens, or to change how convo manages them: compactAt (tokens, 0 leaves compaction to Claude Code), clearOldOutput, holdBackTools, keepTools (names to always keep). A change asks the person first.",
-      inputSchema: { type: 'object', properties: { compactAt: { type: 'number', description: 'Compact with a keyframe once the context reaches this many tokens, setup included (50000 or more); 0 turns it off' }, clearOldOutput: { type: 'boolean', description: 'Clear old tool output from the context' }, holdBackTools: { type: 'boolean', description: 'Hold back built-in tools this project has not used' }, keepTools: { type: 'string', description: 'Tool names never held back, separated by commas' } } },
+        "convo's context manager: what every request carries (the setup, and the tools convo holds back behind ToolSearch), tool output condensed as it arrived and cleared later, where it compacts, and the cache. Use it when the person asks about their context or tokens, or to change how convo manages them: compactAt (tokens, 0 leaves compaction to Claude Code), clearOldOutput, holdBackTools, keepTools (tool names to always keep), condenseOutput, neverCondense (commands or tools always shown whole). A change asks the person first.",
+      inputSchema: { type: 'object', properties: { compactAt: { type: 'number', description: 'Compact with a keyframe once the context reaches this many tokens, setup included (50000 or more); 0 turns it off' }, clearOldOutput: { type: 'boolean', description: 'Clear old tool output from the context' }, holdBackTools: { type: 'boolean', description: 'Hold back built-in tools this project has not used' }, keepTools: { type: 'string', description: 'Tool names never held back, separated by commas' }, condenseOutput: { type: 'boolean', description: 'Condense long tool output as it arrives' }, neverCondense: { type: 'string', description: 'Commands or tools whose output always arrives whole, separated by commas' } } },
     },
     {
       key: 'pane' as const,
