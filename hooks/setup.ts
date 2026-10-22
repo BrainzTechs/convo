@@ -1,7 +1,9 @@
-// What every request's setup could drop: built-in tools, skills and agent
-// types this project has not used lately, and their tokens. Measured only:
-// nothing is held back. register.ts records each session's use, reads the
-// sizes Claude Code reports, and shows the result in the pane's token section.
+// The setup every request carries: what this project has not used lately,
+// and their tokens. Built-in tools unused here are held back behind
+// ToolSearch (their names stay listed; Claude loads one when it needs it);
+// skills and agent types are measured only. register.ts records each
+// session's use, reads the sizes Claude Code reports, answers tool.describe,
+// and shows the result in the pane's Context section.
 
 import type { Io } from './io.ts'
 import type { Row } from './turns.ts'
@@ -22,6 +24,20 @@ export const KEEP_TOOLS = new Set([
 ])
 /** Agent types always kept: the one Claude falls back on. */
 export const KEEP_AGENTS = new Set(['general-purpose'])
+/** Tools are held back only on a week of this project's use or more. */
+export const HOLD_DAYS = 7
+
+/** The keep setting's tool names: separated by commas or spaces. */
+export const parseKeep = (s: unknown): Set<string> => new Set(typeof s === 'string' ? s.split(/[\s,]+/).map(x => x.trim()).filter(Boolean) : [])
+
+/**
+ * Whether a built-in tool listed in front goes behind ToolSearch: with the
+ * setting on, ToolSearch there to find it, a week of use to judge on, and the
+ * tool neither core, kept by the person, nor used here.
+ */
+export function shouldHoldBack(tool: string, o: { on: boolean; toolSearch: boolean; days: number; used: ReadonlySet<string>; keep: ReadonlySet<string> }): boolean {
+  return o.on && o.toolSearch && o.days >= HOLD_DAYS && !KEEP_TOOLS.has(tool) && !o.keep.has(tool) && !o.used.has(tool)
+}
 
 /** What one session used: names by kind, with the time each was last used. */
 export type Usage = { started: number; tools: Record<string, number>; skills: Record<string, number>; agents: Record<string, number> }
@@ -76,6 +92,8 @@ const usedName = (used: ReadonlySet<string>, name: string): boolean => used.has(
 export type SetupSizes = {
   /** Built-in tools listed in front, each with its description's length. */
   tools: { name: string; chars: number }[]
+  /** Built-in tools convo held back, each with its description's length. */
+  held?: { name: string; chars: number }[]
   /** /context's "System tools" tokens: shared among the tools by description length. */
   toolTokens: number
   skills: { name: string; tokens: number }[]
@@ -90,10 +108,12 @@ export function setupSavings(sizes: SetupSizes, used: Used, o: { days: number; s
   const share = (c: number): number => (chars ? Math.round((sizes.toolTokens * c) / chars) : 0)
   const byTokens = (a: [string, number], b: [string, number]): number => b[1] - a[1]
   const tools = sizes.tools.filter(t => !KEEP_TOOLS.has(t.name) && !used.tools.has(t.name)).map(t => [t.name, share(t.chars)] as [string, number]).sort(byTokens)
+  // What held-back tools would take in front: their length at the rate the tools still listed take
+  const held = (sizes.held ?? []).map(t => [t.name, share(t.chars)] as [string, number]).sort(byTokens)
   const skills = sizes.skills.filter(s => !usedName(used.skills, s.name)).map(s => [s.name, s.tokens] as [string, number]).sort(byTokens)
   const agents = o.agentsCounted ? sizes.agents.filter(a => !KEEP_AGENTS.has(a.name) && !used.agents.has(a.name)).map(a => [a.name, a.tokens] as [string, number]).sort(byTokens) : []
   const sum = (xs: [string, number][]): number => xs.reduce((s, [, n]) => s + n, 0)
-  return { tokens: sum(tools) + sum(skills) + sum(agents), tools, skills, agents, days: o.days, sessions: o.sessions, agentsCounted: o.agentsCounted }
+  return { tokens: sum(tools) + sum(skills) + sum(agents), tools, skills, agents, held, heldTokens: sum(held), days: o.days, sessions: o.sessions, agentsCounted: o.agentsCounted }
 }
 
 // ── Records on disk ─────────────────────────────────────────────────────

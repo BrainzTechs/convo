@@ -48,6 +48,10 @@ export class World {
   after: { ms: number; f: () => unknown; cancelled: boolean }[] = []
   /** Compactions convo started itself ($.session.compact), with what came back. */
   pluginCompactions: any[] = []
+  /** What convo answered when Claude Code described each tool, by name. */
+  described = new Map<string, { description: string; isDeferred?: boolean }>()
+  /** Settings convo changed ($.config.set). */
+  configSets: { key: string; value: unknown }[] = []
   logs: string[] = []
   asked: string[] = []
   modelCalls: { system: string; prompt: string }[] = []
@@ -182,7 +186,8 @@ export class World {
         startedAt: 0,
         context: { tokens: this.cached.get('main') ?? 0, window: 1_000_000, breakdown: { categories: [
           { name: 'System prompt', tokens: 3000, kind: 'used' },
-          { name: 'System tools', tokens: 7000, kind: 'used' },
+          // As Claude Code's breakdown does: no system tools once any built-in tool is held back
+          ...([...this.described.values()].some(d => d.isDeferred) ? [] : [{ name: 'System tools', tokens: 7000, kind: 'used' }]),
           { name: 'Messages', tokens: Math.max(0, (this.cached.get('main') ?? 0) - 10_000), kind: 'used' },
         ], ...(this.o.setup ? {
           skills: { totalSkills: this.o.setup.skills.length, includedSkills: this.o.setup.skills.length, tokens: this.o.setup.skills.reduce((s, x) => s + x.tokens, 0), skillFrontmatter: this.o.setup.skills.map(x => ({ ...x, source: 'plugin' })) },
@@ -191,6 +196,13 @@ export class World {
         rateLimits: [],
         cost: { usd: 0.01 * (this.cached.get('main') ?? 0) / 1000 },
       }),
+    },
+    config: {
+      list: async () => ['compactAt', 'clearOldOutput', 'holdBackTools', 'keepTools'].map(f => ({ key: `convo.${f}`, label: f, kind: 'text', value: '', provider: { plugin: 'convo', tier: 'user' }, isLocked: false })),
+      set: async (a: { key: string; value: unknown }) => {
+        this.configSets.push(a)
+        return { value: a.value }
+      },
     },
     store: {
       get: async (k: string) => this.store.get(k),
@@ -238,7 +250,7 @@ export class World {
     mkdirSync(this.transcriptDir, { recursive: true })
     await this.fire('session.start', { cwd: this.o.cwd, surface: null, isInteractive }, () => ({}))
     // Claude Code describes each tool once, as it first lists them
-    for (const t of this.o.setup?.tools ?? []) await this.fire('tool.describe', { tool: t.name, description: t.description, provider: { plugin: 'engine', tier: 'core' } }, e => ({ description: e.description }))
+    for (const t of this.o.setup?.tools ?? []) this.described.set(t.name, await this.fire('tool.describe', { tool: t.name, description: t.description, provider: { plugin: 'engine', tier: 'core' } }, e => ({ description: e.description })))
   }
 
   /** The view convo published for its pane. */
@@ -371,7 +383,7 @@ export class World {
   }
 
   /** Calls one of convo's tools as Claude would. */
-  async tool(name: 'recall' | 'turn' | 'branches' | 'merge' | 'pane', args: Record<string, unknown>): Promise<{ result?: string; deny?: string }> {
+  async tool(name: 'recall' | 'turn' | 'branches' | 'merge' | 'pane' | 'context', args: Record<string, unknown>): Promise<{ result?: string; deny?: string }> {
     return this.fire('tool.call', { tool: `mcp__convo__${name}`, tool_use_id: randomUUID(), ...args }, () => ({ deny: 'no hook answered' }))
   }
 

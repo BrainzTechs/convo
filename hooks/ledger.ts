@@ -111,20 +111,31 @@ export function k(n: number): string {
   return String(Math.round(n))
 }
 
-/** What the setup could drop, in a line and the largest items; nothing when it could drop little. */
+/** Names and sizes, largest first, a few of them. */
+const listed = (xs: readonly [string, number][], most = 4): string => {
+  const shown = xs.slice(0, most).map(([name, tokens]) => `${name} ${k(tokens)}`).join(', ')
+  return xs.length > most ? `${shown} and ${xs.length - most} more` : shown
+}
+
+/** The setup's lines: what convo held back, and what it could also drop (measured only). */
 export function trimRows(t: ConvoTrim | undefined): string[] {
-  if (!t || t.tokens < 1000) return []
+  if (!t) return []
+  const out: string[] = []
+  if (t.held.length) out.push(`  held back ${k(t.heldTokens)} of tools unused here, behind ToolSearch: ${listed(t.held)}`)
+  if (t.tokens < 1000) return out
   const n = (xs: readonly unknown[], one: string, many: string): string => `${xs.length} ${xs.length === 1 ? one : many}`
   const kinds = [t.tools.length ? n(t.tools, 'tool', 'tools') : '', t.skills.length ? n(t.skills, 'skill', 'skills') : '', t.agents.length ? n(t.agents, 'agent', 'agents') : ''].filter(Boolean).join(', ')
   const when = t.days >= 30 ? 'in the last 30 days' : t.days < 1 ? 'yet (convo has seen under a day here)' : `in the ${t.days === 1 ? 'day' : `${t.days} days`} convo has seen`
-  const largest = [...t.tools, ...t.skills, ...t.agents].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, tokens]) => `${name} ${k(tokens)}`).join(', ')
-  return [
-    `  setup could drop ${k(t.tokens)}: ${kinds} unused here ${when}${t.agentsCounted ? '' : ' (agents counted after a week)'}`,
-    `    largest: ${largest}`,
-  ]
+  out.push(`  could ${t.held.length ? 'also ' : ''}drop ${k(t.tokens)}: ${kinds} unused here ${when}${t.agentsCounted ? '' : ' (agents counted after a week)'}`)
+  out.push(`    largest: ${listed([...t.tools, ...t.skills, ...t.agents].sort((a, b) => b[1] - a[1]), 5)}`)
+  return out
 }
 
-/** The pane's token section. */
+/**
+ * The pane's Context section: what every request carries (the setup, with
+ * what convo held back), the conversation and what was cleared from it,
+ * where it compacts, and the window's requests and cache.
+ */
 export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[] {
   if (!l || !l.requests) return []
   const rows: PaneRow[] = []
@@ -135,10 +146,9 @@ export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[]
   add('')
   // The status line's cost is the session's, a resumed one's included: this window's share is what it rose by
   const cost = l.costUsd !== undefined ? l.costUsd - (l.costBase ?? 0) : undefined
-  add(`Tokens · this window${cost !== undefined ? ` · $${cost.toFixed(2)}` : ''}`, 'title')
-  add(`  ${k(input)} in over ${l.requests} request${l.requests === 1 ? '' : 's'}, ${k(l.output)} out`)
+  add(`Context · this window${cost !== undefined ? ` · $${cost.toFixed(2)}` : ''}`, 'title')
   if (l.setup?.total) add(`  every request carries ${k(l.setup.total)} of setup: ${l.setup.parts.slice(0, 3).map(([name, n]) => `${name.toLowerCase()} ${k(n)}`).join(', ')}`, 'dim')
-  for (const r of trimRows(l.trim)) add(r, 'dim')
+  for (const r of trimRows(l.trim)) add(r, r.startsWith('  held back') ? 'good' : 'dim')
   const tools = Object.entries(l.toolOutput).sort((a, b) => b[1] - a[1])
   const toolTotal = tools.reduce((t, [, n]) => t + n, 0)
   if (l.conversation || toolTotal) {
@@ -146,15 +156,18 @@ export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[]
     const out = toolTotal ? `tool output added ${k(toolTotal)} (${tools.slice(0, 3).map(([t, n]) => `${t} ${k(n)}`).join(', ')})` : ''
     add(`  ${[conv, out].filter(Boolean).join('; ')}`, 'dim')
   }
+  if (l.cleared) {
+    const c = l.cleared
+    add(`  cleared ${k(c.tokens)} of old tool output from the context (${c.outputs} output${c.outputs === 1 ? '' : 's'}, ${c.times} time${c.times === 1 ? '' : 's'}); git keeps it`, 'good')
+  }
+  if (l.compactAt) add(`  compacts at ${k(l.compactAt)} with a keyframe (your setting)${l.autoCompactAt ? `; Claude Code's own limit ${k(l.autoCompactAt)}` : ''}`, 'dim')
+  else if (l.autoCompactAt) add(`  compacts at Claude Code's limit, ${k(l.autoCompactAt)}, with a keyframe`, 'dim')
+  add(`  ${k(input)} in over ${l.requests} request${l.requests === 1 ? '' : 's'}, ${k(l.output)} out`)
   const rate = input ? Math.round((100 * l.read) / input) : 0
   const misses = l.misses.length
   const warm = l.warmup && l.warmup >= MISS_TOKENS ? ` · ${k(l.warmup)} cached by the first request` : ''
   add(`  cache: ${rate}% read from cache${misses ? ` · ${misses} miss${misses === 1 ? '' : 'es'}, ${k(l.missTokens ?? 0)} re-cached` : ' · no misses'}${l.expected ? ` · ${l.expected} after compacting or clearing` : ''}${warm}`, misses ? 'warn' : 'good')
   for (const m of l.misses.slice(-3)) add(`    ${m.loop === 'main' ? (m.turn !== undefined ? `turn ${m.turn}` : 'a request') : 'a subagent'}: ${k(m.tokens)} re-cached, ${m.why}`, 'warn')
-  if (l.cleared) {
-    const c = l.cleared
-    add(`  cleared ${k(c.tokens)} of old tool output from the context (${c.outputs} output${c.outputs === 1 ? '' : 's'}, ${c.times} time${c.times === 1 ? '' : 's'}); git keeps it`, 'good')
-  }
   if (l.agents.runs || l.agents.tokens) add(`  subagents: ${l.agents.runs} run${l.agents.runs === 1 ? '' : 's'}, ${k(l.agents.tokens)} tokens${l.agents.models.length ? ` (${l.agents.models.join(', ')})` : ''}`, 'dim')
   return rows
 }

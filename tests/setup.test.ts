@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { addUsage, commandName, emptyUsage, namesFromHistory, setupSavings } from '../hooks/setup.ts'
+import { addUsage, commandName, emptyUsage, namesFromHistory, parseKeep, setupSavings, shouldHoldBack } from '../hooks/setup.ts'
 import { trimRows } from '../hooks/ledger.ts'
 import type { Row } from '../hooks/turns.ts'
 
@@ -48,13 +48,33 @@ describe('what the setup could drop', () => {
   })
 
   test('the pane says it in a line and the largest items; nothing when it is little', () => {
-    const t = { tokens: 18_400, tools: [['CronCreate', 3000], ['NotebookEdit', 1000]] as [string, number][], skills: [['anthropic-skills:pptx', 1500]] as [string, number][], agents: [] as [string, number][], days: 12, sessions: 5, agentsCounted: false }
+    const t = { tokens: 18_400, tools: [['CronCreate', 3000], ['NotebookEdit', 1000]] as [string, number][], skills: [['anthropic-skills:pptx', 1500]] as [string, number][], agents: [] as [string, number][], held: [] as [string, number][], heldTokens: 0, days: 12, sessions: 5, agentsCounted: false }
     expect(trimRows(t)).toEqual([
-      '  setup could drop 18k: 2 tools, 1 skill unused here in the 12 days convo has seen (agents counted after a week)',
+      '  could drop 18k: 2 tools, 1 skill unused here in the 12 days convo has seen (agents counted after a week)',
       '    largest: CronCreate 3.0k, anthropic-skills:pptx 1.5k, NotebookEdit 1.0k',
     ])
-    expect(trimRows({ ...t, days: 30, agentsCounted: true })[0]).toBe('  setup could drop 18k: 2 tools, 1 skill unused here in the last 30 days')
-    expect(trimRows({ ...t, days: 0 })[0]).toBe('  setup could drop 18k: 2 tools, 1 skill unused here yet (convo has seen under a day here) (agents counted after a week)')
+    expect(trimRows({ ...t, days: 30, agentsCounted: true })[0]).toBe('  could drop 18k: 2 tools, 1 skill unused here in the last 30 days')
+    expect(trimRows({ ...t, days: 0 })[0]).toBe('  could drop 18k: 2 tools, 1 skill unused here yet (convo has seen under a day here) (agents counted after a week)')
     expect(trimRows({ ...t, tokens: 400 })).toEqual([])
+    // What convo held back comes first; five or more are summed up
+    const held: [string, number][] = [['Artifact', 13_000], ['Workflow', 2300], ['SendFeedback', 2300], ['ScheduleWakeup', 2100], ['ListAgents', 516]]
+    expect(trimRows({ ...t, held, heldTokens: 20_216 })).toEqual([
+      '  held back 20k of tools unused here, behind ToolSearch: Artifact 13k, Workflow 2.3k, SendFeedback 2.3k, ScheduleWakeup 2.1k and 1 more',
+      '  could also drop 18k: 2 tools, 1 skill unused here in the 12 days convo has seen (agents counted after a week)',
+      '    largest: CronCreate 3.0k, anthropic-skills:pptx 1.5k, NotebookEdit 1.0k',
+    ])
+  })
+
+  test('a built-in tool is held back only on a week of use, with ToolSearch there, when it is not core, kept or used', () => {
+    const base = { on: true, toolSearch: true, days: 9, used: new Set(['WebFetch']), keep: parseKeep('NotebookEdit, CronCreate') }
+    expect(shouldHoldBack('Artifact', base)).toBe(true)
+    expect(shouldHoldBack('WebFetch', base)).toBe(false)
+    expect(shouldHoldBack('NotebookEdit', base)).toBe(false)
+    expect(shouldHoldBack('Bash', base)).toBe(false)
+    expect(shouldHoldBack('Artifact', { ...base, days: 6 })).toBe(false)
+    expect(shouldHoldBack('Artifact', { ...base, toolSearch: false })).toBe(false)
+    expect(shouldHoldBack('Artifact', { ...base, on: false })).toBe(false)
+    expect([...parseKeep(' WebFetch,NotebookEdit  Monitor ')]).toEqual(['WebFetch', 'NotebookEdit', 'Monitor'])
+    expect(parseKeep(undefined).size).toBe(0)
   })
 })

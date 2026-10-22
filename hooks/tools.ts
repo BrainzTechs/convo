@@ -270,6 +270,13 @@ export async function registerTools(io: Io): Promise<void> {
       inputSchema: { type: 'object', properties: {} },
     },
     {
+      key: 'context' as const,
+      isDeferred: true,
+      description:
+        "convo's context manager: what every request carries (the setup, and the tools convo holds back behind ToolSearch), what was cleared from the conversation, where it compacts, and the cache. Use it when the person asks about their context or tokens, or to change how convo manages them: compactAt (tokens, 0 leaves compaction to Claude Code), clearOldOutput, holdBackTools, keepTools (names to always keep). A change asks the person first.",
+      inputSchema: { type: 'object', properties: { compactAt: { type: 'number', description: 'Compact with a keyframe once the context reaches this many tokens, setup included (50000 or more); 0 turns it off' }, clearOldOutput: { type: 'boolean', description: 'Clear old tool output from the context' }, holdBackTools: { type: 'boolean', description: 'Hold back built-in tools this project has not used' }, keepTools: { type: 'string', description: 'Tool names never held back, separated by commas' } } },
+    },
+    {
       key: 'pane' as const,
       isDeferred: true,
       description: "Open convo's pane beside the chat: this conversation's turns, the keyframe Claude works from, open questions, and its forks, rewinds, merges and subagents. Use it when the person asks to see convo, its pane, or the conversation's branches at a glance.",

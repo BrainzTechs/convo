@@ -33,7 +33,7 @@ import { branchList, mergeBranch, readTurn, recall, registerTools } from './tool
 import { buildView, emptyView, paneRows, type PaneRow } from './view.ts'
 import { addAgentRun, addClearing, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
 import { applyClearing, planClearing, shouldClear } from './clearing.ts'
-import { addUsage, backfillUsage, emptyUsage, loadUsage, saveUsage, setupSavings, usedInWindow, type Usage } from './setup.ts'
+import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import type { ConvoLedger } from '../types/index.d.ts'
 
 /**
@@ -129,6 +129,20 @@ function toolOutputOf(rows: readonly Row[]): Record<string, number> {
 /** Built-in tools listed in front, each with its description's length; kept in the store, as tool.describe fires once a process. */
 let toolSizes: Record<string, number> = {}
 let toolSizesDirty = false
+/** Built-in tools convo held back behind ToolSearch in this process, each with its description's length. */
+const heldTools: Record<string, number> = {}
+/** What the hold-back is judged on, read as the session starts; until then nothing is held back. */
+let holdOn: { used: ReadonlySet<string>; days: number } | undefined
+/** Whether ToolSearch is there to find a held-back tool: seen listed, here or in an earlier process. */
+let toolSearchSeen = false
+/**
+ * /context's system tools tokens per character of the tools' descriptions, from a session that reported them: with
+ * tools held back, Claude Code's breakdown leaves the system tools out, and convo estimates them at this rate.
+ */
+let toolRate: number | undefined
+
+/** The settings (/config, under convo), as the module was loaded with them. */
+const settings = { compactAt: 0, clearOldOutput: true, holdBackTools: true, keepTools: new Set<string>() }
 /** This session's use of tools, skills and agent types, and the session it belongs to. */
 let usage: Usage = emptyUsage(Date.now())
 let usageSid = ''
@@ -179,9 +193,25 @@ async function countTurn($: EngineInterface, agentId: string | undefined, rows: 
         }
         else window = { at: window.at, w: { ...window.w, used: { tools: new Set([...window.w.used.tools, ...Object.keys(usage.tools)]), skills: new Set([...window.w.used.skills, ...Object.keys(usage.skills)]), agents: new Set([...window.w.used.agents, ...Object.keys(usage.agents)]) } } }
         const b = u.context.breakdown
+        l.compactAt = settings.compactAt || undefined
+        l.autoCompactAt = u.context.breakdown?.autoCompactThreshold
+        const frontChars = Object.values(toolSizes).reduce((s, n) => s + n, 0)
+        let toolTokens = categories.find(c => /^system tools$/i.test(c.name))?.tokens ?? 0
+        if (toolTokens > 0 && frontChars > 0) {
+          const r = toolTokens / frontChars
+          if (r !== toolRate) {
+            toolRate = r
+            await $.store.set('tool-rate', r)
+          }
+        } else if (toolRate && frontChars) {
+          // Left out of the breakdown: estimated at the rate an earlier session measured, and said so
+          toolTokens = Math.round(toolRate * frontChars)
+          if (l.setup) l.setup = { total: l.setup.total + toolTokens, parts: [...l.setup.parts, ['System tools (estimated)', toolTokens] as [string, number]].sort((a, b) => b[1] - a[1]) }
+        }
         l.trim = setupSavings({
           tools: Object.entries(toolSizes).map(([name, chars]) => ({ name, chars })),
-          toolTokens: categories.find(c => /^system tools$/i.test(c.name))?.tokens ?? 0,
+          held: Object.entries(heldTools).map(([name, chars]) => ({ name, chars })),
+          toolTokens,
           skills: (b?.skills?.skillFrontmatter ?? []).map(s => ({ name: s.name, tokens: s.tokens })),
           agents: (b?.agents ?? []).map(a => ({ name: a.agentType, tokens: a.tokens })),
         }, window.w.used, window.w)
@@ -207,7 +237,7 @@ let clearingOff = ''
 
 /** Clears old tool output now, when enough has piled up; says whether it did. Only from turn.complete: nowhere else does convo's hook get the compaction. */
 async function clearOld($: EngineInterface): Promise<boolean> {
-  if (clearingOff || clearing || !S.gitOk) return false
+  if (!settings.clearOldOutput || clearingOff || clearing || !S.gitOk) return false
   try {
     const plan = planClearing(await $.session.messages(), { lastTurn: lastFinished })
     if (!shouldClear(plan)) return false
@@ -272,6 +302,71 @@ async function compactEarly($: EngineInterface): Promise<void> {
   }
 }
 
+// ── The context tool: what the manager does, and changing its settings ─
+const SETTINGS = ['compactAt', 'clearOldOutput', 'holdBackTools', 'keepTools'] as const
+type SettingKey = (typeof SETTINGS)[number]
+
+/** The settings as they stand, in a few lines. */
+function settingsText(): string {
+  return [
+    `compactAt: ${settings.compactAt ? `${settings.compactAt} tokens` : "0 (Claude Code's own limit)"}`,
+    `clearOldOutput: ${settings.clearOldOutput ? 'on' : 'off'}`,
+    `holdBackTools: ${settings.holdBackTools ? 'on' : 'off'}`,
+    `keepTools: ${settings.keepTools.size ? [...settings.keepTools].join(', ') : '(none)'}`,
+  ].join('\n')
+}
+
+/** A setting's value from the tool's input, checked; a reason when it does not fit. */
+function settingValue(key: SettingKey, v: unknown): { value: number | boolean | string } | { why: string } {
+  if (key === 'compactAt') {
+    const n = Number(v)
+    if (!Number.isFinite(n) || n < 0) return { why: 'compactAt takes a number of tokens' }
+    if (n > 0 && n < COMPACT_AT_MIN) return { why: `compactAt is ${COMPACT_AT_MIN} tokens at least (or 0 to turn it off)` }
+    return { value: Math.round(n) }
+  }
+  if (key === 'keepTools') return typeof v === 'string' ? { value: [...parseKeep(v)].join(', ') } : { why: 'keepTools takes tool names, separated by commas' }
+  return typeof v === 'boolean' ? { value: v } : { why: `${key} takes true or false` }
+}
+
+/**
+ * The context tool: with no settings given, what the manager does now; with
+ * some, asks the person, then changes them as /config would (convo reloads
+ * with them; tools held back change from the next session).
+ */
+async function contextTool($: EngineInterface, input: { readonly [k: string]: unknown }): Promise<string> {
+  const asked = SETTINGS.filter(key => input[key] !== undefined)
+  const report = (): string => {
+    const lines = ledgerRows(ledger, 100).map(r => r.text).filter(Boolean)
+    return [lines.length ? lines.join('\n') : 'No requests counted yet in this window.', '', 'Settings (/config, under convo):', settingsText()].join('\n')
+  }
+  if (!asked.length) return report()
+  const changes: { key: SettingKey; value: number | boolean | string }[] = []
+  for (const key of asked) {
+    const v = settingValue(key, input[key])
+    if ('why' in v) return `Not changed: ${v.why}.`
+    changes.push({ key, value: v.value })
+  }
+  const what = changes.map(c => `${c.key} → ${typeof c.value === 'string' && !c.value ? '(none)' : String(c.value)}`).join(', ')
+  let answer: string
+  try {
+    answer = await $.ui.ask(`Change convo's context settings: ${what}?`, { options: ['Change them', 'Leave them'], header: 'convo' })
+  } catch {
+    return `Not changed: changing convo's settings needs the person's yes, and nobody could be asked. They can change them in /config, under convo.`
+  }
+  if (answer !== 'Change them') return 'Not changed: the person chose to leave the settings as they are.'
+  const rows = await $.config.list()
+  const done: string[] = []
+  for (const c of changes) {
+    const row = rows.find(r => r.key.endsWith(`.${c.key}`) && (r.provider as { plugin?: string }).plugin === 'convo')
+    if (!row) return `Not changed: ${c.key} is not in /config here (${done.length ? `changed so far: ${done.join(', ')}` : 'nothing changed'}).`
+    const r = await $.config.set({ key: row.key, value: c.value })
+    if ('deny' in r && r.deny) return `Not changed: ${c.key}: ${r.deny}${done.length ? ` (changed so far: ${done.join(', ')})` : ''}.`
+    done.push(c.key)
+  }
+  const later = changes.some(c => c.key === 'holdBackTools' || c.key === 'keepTools') ? ' Which tools are held back changes from the next session, as Claude Code lists its tools once a session.' : ''
+  return `Changed: ${what}. convo reloads with the new settings.${later}`
+}
+
 /** How each kind of row reads. */
 function toneOf(tone: PaneRow['tone']): Record<string, unknown> {
   if (tone === 'title') return { bold: true }
@@ -282,14 +377,22 @@ function toneOf(tone: PaneRow['tone']): Record<string, unknown> {
 }
 
 export const register: Register = (on, options) => {
-  const setting = Number((options as Readonly<Record<string, unknown>> | undefined)?.compactAt ?? 0)
+  const o = (options ?? {}) as Readonly<Record<string, unknown>>
+  const setting = Number(o.compactAt ?? 0)
   compactAt = Number.isFinite(setting) && setting > 0 ? Math.max(COMPACT_AT_MIN, setting) : 0
+  settings.compactAt = compactAt
+  settings.clearOldOutput = o.clearOldOutput !== false
+  settings.holdBackTools = o.holdBackTools !== false
+  settings.keepTools = parseKeep(o.keepTools)
 
   on('session.start', async ($, e, next) => {
     const io = ioOf($)
     ioOfStatic = io
     const kept = await $.store.get('tool-sizes')
     if (kept && typeof kept === 'object' && !Object.keys(toolSizes).length) toolSizes = kept as Record<string, number>
+    if (toolSizes.ToolSearch !== undefined) toolSearchSeen = true
+    const rate = await $.store.get('tool-rate')
+    if (typeof rate === 'number' && rate > 0) toolRate = rate
     const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
     S.cwd = e.cwd
     S.root = home ? await projectRoot(io, home, e.cwd) : ''
@@ -312,6 +415,17 @@ export const register: Register = (on, options) => {
       $.clock.after(5000, () => adoptOrphans(io))
       $.clock.every(300_000, () => adoptOrphans(io))
       await registerTools(io)
+      // What this project used, for the tools held back when Claude Code first lists them (once a process)
+      if (settings.holdBackTools) {
+        try {
+          const now = Date.now()
+          await backfillUsage(io, now)
+          const w = await usedInWindow(io, now, await usageFor(S.sid))
+          holdOn = { used: w.used.tools, days: w.days }
+        } catch (err) {
+          $.ui.log(`convo: no tools held back: ${String(err).slice(0, 200)}`, { to: 'debug' })
+        }
+      }
       // The pane follows the history: after each flush, and every 30 s for other sessions' moves
       $.clock.every(2000, () => publish($))
       $.clock.every(30_000, () => publish($, true))
@@ -330,16 +444,26 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Each built-in tool's description as Claude Code lists it, for the share of the setup it takes; nothing is changed
+  // Each built-in tool as Claude Code lists it: its share of the setup, and, when this project has not used it, held
+  // back behind ToolSearch (its name stays listed; Claude loads it when it needs it)
   on('tool.describe', async ($, e, next) => {
     const r = await next(e)
     const provider = e.provider as { plugin?: string }
     const deferred = r.isDeferred === undefined ? e.isDeferred === true : r.isDeferred === true
-    if (provider.plugin === 'engine') {
-      if (deferred) delete toolSizes[e.tool]
-      else toolSizes[e.tool] = r.description.length
-      toolSizesDirty = true
+    if (provider.plugin !== 'engine') return r
+    if (e.tool === 'ToolSearch') toolSearchSeen = true
+    toolSizesDirty = true
+    if (deferred) {
+      delete toolSizes[e.tool]
+      return r
     }
+    if (holdOn && shouldHoldBack(e.tool, { on: settings.holdBackTools, toolSearch: toolSearchSeen, days: holdOn.days, used: holdOn.used, keep: settings.keepTools })) {
+      heldTools[e.tool] = r.description.length
+      delete toolSizes[e.tool]
+      return { ...r, isDeferred: true }
+    }
+    delete heldTools[e.tool]
+    toolSizes[e.tool] = r.description.length
     return r
   }).catch(($, e, next) => next(e))
 
@@ -399,7 +523,8 @@ export const register: Register = (on, options) => {
   // needs nothing; reading other sessions' history, listing them, and merging (which writes records and calls a
   // model) wait for the person, so an instruction injected into a turn cannot quietly pull another conversation in.
   // One hook serves all four; a registered tool's arguments arrive on the event itself, beside `tool`
-  on('tool.call', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__pane'] }, async ($, e) => {
+  on('tool.call', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__pane', 'mcp__convo__context'] }, async ($, e) => {
+    if (e.tool === 'mcp__convo__context') return { result: await contextTool($, e as { readonly [k: string]: unknown }) }
     // Showing the pane reads nothing beyond what the person sees: no permission, and it works with history off
     if (e.tool === 'mcp__convo__pane') {
       await $.store.set('pane-closed', false)

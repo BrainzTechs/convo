@@ -159,7 +159,57 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('agent types, with a week of records: Explore and Plan (a subagent ran as general-purpose)', t?.agentsCounted === true && JSON.stringify(t.agents) === JSON.stringify([['Explore', 400], ['Plan', 350]]), JSON.stringify(t))
     check('in all', t?.tokens === 4580, String(t?.tokens))
     const text = (await import('../../hooks/ledger.ts')).ledgerRows(w.ledger(), 200).map(r => r.text).join('\n')
-    check('the pane says it, and nothing was held back', text.includes('setup could drop 4.6k: 3 tools, 1 skill, 2 agents unused here in the 8 days convo has seen') && text.includes('largest: CronCreate 1.6k'), text)
+    check('the pane says it; nothing held back, as the first session had too little history', text.includes('could drop 4.6k: 3 tools, 1 skill, 2 agents unused here in the 8 days convo has seen') && text.includes('largest: CronCreate 1.6k') && !text.includes('held back'), text)
+  },
+
+  async contextManager(dir, check) {
+    const DAY = 24 * 60 * 60_000
+    const setup = {
+      tools: [['ToolSearch', 500], ['Bash', 4000], ['Read', 3000], ['WebFetch', 2000], ['Artifact', 9000], ['CronCreate', 3000]].map(([name, n]) => ({ name: String(name), description: 'd'.repeat(Number(n)) })),
+      skills: [{ name: 'anthropic-skills:pptx', tokens: 600 }],
+      agents: [{ agentType: 'general-purpose', tokens: 300 }],
+    }
+    const w = await world(dir, { setup, answer: 'Change them' })
+    await w.start(A)
+    check('a first session with no history holds nothing back', [...w.described.values()].every(d => !d.isDeferred))
+    await w.turn('List the files.', 'Two.', { tools: [{ name: 'Bash', input: { command: 'ls' }, output: 'a\nb' }] })
+    await w.timers()
+    // Ten days of this project's use: WebFetch was used
+    writeFileSync(`${w.root}/usage/dddddddd-old.json`, JSON.stringify({ started: Date.now() - 10 * DAY, tools: { WebFetch: Date.now() - 2 * DAY }, skills: {}, agents: {} }))
+    await w.start(B)
+    const held = [...w.described].filter(([, d]) => d.isDeferred).map(([n]) => n)
+    check('the next session holds back the tools unused in ten days: Artifact and CronCreate (core ones and WebFetch stay)', held.join() === 'Artifact,CronCreate', held.join())
+    await w.turn('Read it.', 'Done.', { tools: [{ name: 'Read', input: { file_path: '/p/a' }, output: 'x' }] })
+    const t = w.ledger()?.trim
+    // The breakdown has no system tools now: convo estimates them at the rate session A measured (7k over all six)
+    const rate = 7000 / 21_500
+    const front = Math.round(rate * 9500)
+    const [art, cron] = [Math.round((front * 9000) / 9500), Math.round((front * 3000) / 9500)]
+    check('the ledger counts what they would take in front, at the rate an earlier session measured', JSON.stringify(t?.held) === JSON.stringify([['Artifact', art], ['CronCreate', cron]]) && t.heldTokens === art + cron, JSON.stringify({ held: t?.held, art, cron }))
+    check('and estimates the system tools still listed, saying so', JSON.stringify(w.ledger()?.setup?.parts).includes(`["System tools (estimated)",${front}]`), JSON.stringify(w.ledger()?.setup))
+    check('and no longer counts them as could-drop', !t?.tools.some(([n]: [string, number]) => n === 'Artifact'), JSON.stringify(t?.tools))
+    const report = await w.tool('context', {})
+    check('the context tool reports the section and the settings', (report.result ?? '').includes(`held back ${(art + cron) / 1000 >= 10 ? Math.round((art + cron) / 1000) : ((art + cron) / 1000).toFixed(1)}k of tools unused here, behind ToolSearch: Artifact ${(art / 1000).toFixed(1)}k, CronCreate 977`) && (report.result ?? '').includes("compactAt: 0 (Claude Code's own limit)") && (report.result ?? '').includes('holdBackTools: on'), report.result)
+    const small = await w.tool('context', { compactAt: 1000 })
+    check('a setting that does not fit is refused before anyone is asked', (small.result ?? '').includes('50000 tokens at least') && w.asked.length === 0, small.result)
+    const change = await w.tool('context', { compactAt: 200_000, keepTools: 'Artifact,  WebFetch' })
+    check('a change asks the person, then sets it as /config would', w.asked.length === 1 && w.asked[0]?.includes('compactAt → 200000') === true && JSON.stringify(w.configSets) === JSON.stringify([{ key: 'convo.compactAt', value: 200000 }, { key: 'convo.keepTools', value: 'Artifact, WebFetch' }]) && (change.result ?? '').includes('from the next session'), JSON.stringify({ asked: w.asked, sets: w.configSets, r: change.result }))
+
+    // Kept by the person, or the setting off: not held back
+    const k = await world(join(dir, 'k'), { setup }, { keepTools: 'CronCreate' })
+    await k.start(A)
+    mkdirSync(`${k.root}/usage`, { recursive: true })
+    writeFileSync(`${k.root}/usage/dddddddd-old.json`, JSON.stringify({ started: Date.now() - 10 * DAY, tools: {}, skills: {}, agents: {} }))
+    await k.start(B)
+    check('a kept tool stays in front', [...k.described].filter(([, d]) => d.isDeferred).map(([n]) => n).join() === 'WebFetch,Artifact')
+    const off = await world(join(dir, 'off'), { setup }, { holdBackTools: false })
+    await off.start(A)
+    mkdirSync(`${off.root}/usage`, { recursive: true })
+    writeFileSync(`${off.root}/usage/dddddddd-old.json`, JSON.stringify({ started: Date.now() - 10 * DAY, tools: {}, skills: {}, agents: {} }))
+    await off.start(B)
+    check('with the setting off, nothing is held back', [...off.described.values()].every(d => !d.isDeferred))
+    const noAsk = await (await world(join(dir, 'n'), { setup })).tool('context', { clearOldOutput: false })
+    check('with nobody to ask, nothing changes', (noAsk.result ?? '').includes('nobody could be asked') || (noAsk.result ?? '').includes('off in this session'), noAsk.result)
   },
 
   async fork(dir, check) {
@@ -410,7 +460,7 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     const { paneRows } = await import('../../hooks/view.ts')
     const { ledgerRows } = await import('../../hooks/ledger.ts')
     const text = paneRows(w.view(), 120, ledgerRows(l, 120)).map((r: { text: string }) => r.text).join('\n')
-    check('the pane shows the tokens and the miss', text.includes('Tokens · this window') && text.includes('turn 4: 50k re-cached, the model changed to sonnet'), text)
+    check('the pane shows the tokens and the miss', text.includes('Context · this window') && text.includes('turn 4: 50k re-cached, the model changed to sonnet'), text)
   },
 
   async subagent(dir, check) {

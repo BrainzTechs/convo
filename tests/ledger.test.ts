@@ -61,7 +61,7 @@ describe('the token ledger', () => {
     l = addClearing(l, { outputs: 2, tokens: 13_900 })
     l = addClearing(l, { outputs: 3, tokens: 40_000 })
     expect(l.cleared).toEqual({ times: 2, outputs: 5, tokens: 53_900 })
-    expect(ledgerRows(l, 200).at(-1)?.text).toBe('  cleared 54k of old tool output from the context (5 outputs, 2 times); git keeps it')
+    expect(ledgerRows(l, 200).map(r => r.text)).toContain('  cleared 54k of old tool output from the context (5 outputs, 2 times); git keeps it')
   })
 
   test('the pane section, and short counts', () => {
@@ -69,15 +69,21 @@ describe('the token ledger', () => {
     expect(ledgerRows(emptyLedger(0), 100)).toEqual([])
     let l = addStep(emptyLedger(0), step(0, 30_000, 10_000))
     l = addStep(l, step(8 * MIN, 0, 41_000), { turn: 14 })
-    l = { ...addToolOutput(l, { Bash: 6000, Read: 1000 }), costUsd: 1.6734, costBase: 1.25, setup: { total: 45_059, parts: [['System tools', 34_297], ['Skills', 7645], ['System prompt', 3117]] }, conversation: 12_000 }
+    l = { ...addToolOutput(l, { Bash: 6000, Read: 1000 }), costUsd: 1.6734, costBase: 1.25, setup: { total: 45_059, parts: [['System tools', 34_297], ['Skills', 7645], ['System prompt', 3117]] }, conversation: 12_000, autoCompactAt: 967_000 }
+    l = { ...l, trim: { tokens: 9800, tools: [], skills: [['anthropic-skills:pptx', 1500], ['anthropic-skills:xlsx', 1200]], agents: [], held: [['Artifact', 13_000], ['Workflow', 2300]], heldTokens: 15_300, days: 30, sessions: 40, agentsCounted: true } }
     expect(ledgerRows(l, 200).map(r => r.text)).toEqual([
       '',
-      'Tokens · this window · $0.42',
-      '  81k in over 2 requests, 200 out',
+      'Context · this window · $0.42',
       '  every request carries 45k of setup: system tools 34k, skills 7.6k, system prompt 3.1k',
+      '  held back 15k of tools unused here, behind ToolSearch: Artifact 13k, Workflow 2.3k',
+      '  could also drop 9.8k: 2 skills unused here in the last 30 days',
+      '    largest: anthropic-skills:pptx 1.5k, anthropic-skills:xlsx 1.2k',
       '  conversation now 12k; tool output added 7.0k (Bash 6.0k, Read 1.0k)',
+      "  compacts at Claude Code's limit, 967k, with a keyframe",
+      '  81k in over 2 requests, 200 out',
       '  cache: 37% read from cache · 1 miss, 41k re-cached · 10k cached by the first request',
       '    turn 14: 41k re-cached, the cache expired after 8 minutes idle',
     ])
+    expect(ledgerRows({ ...l, compactAt: 200_000 }, 200).map(r => r.text)).toContain("  compacts at 200k with a keyframe (your setting); Claude Code's own limit 967k")
   })
 })

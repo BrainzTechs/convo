@@ -8,9 +8,11 @@ at the turn it came from, and a rewind branches off the earlier turn while
 keeping the line you left. Ask Claude to bring a branch back and it merges
 it; ask about something from earlier and it looks it up.
 
-It also keeps the context lean: once a lot of old tool output has piled up,
-convo clears it from the context, leaving a one-line stub that says where git
-keeps it word for word.
+It also manages the context every request carries: built-in tools this
+project does not use go behind ToolSearch, old tool output is cleared once it
+piles up (git keeps it word for word), and you can have it compact earlier
+than Claude Code would. In a live run, holding back unused tools took each
+request from 58k tokens to 40k.
 
 Everything is automatic: there are no commands to learn.
 
@@ -128,7 +130,7 @@ It falls back rather than fail you:
 
 Each keyframe ends by pointing Claude at the recall tools below.
 
-### Compacting earlier
+### Compacting earlier (the compactAt setting)
 
 Claude Code compacts only when the window is nearly full (about 967k tokens
 of a 1M window), so until then every request carries the whole conversation.
@@ -149,7 +151,64 @@ a live run with the setting at 80k, a conversation of 87k went to 47k, and
 Claude answered a question about the first turn from the keyframe. Off (0) by
 default.
 
-## Old tool output, cleared
+## The context manager
+
+Everything Claude reads on each request is the setup (system prompt, tools,
+skills, agent types) plus the conversation. convo keeps both lean, on its own,
+with safe defaults:
+
+| Part | What it does | Setting (`/config`, under convo) | Default |
+|---|---|---|---|
+| Unused tools | Built-in tools this project has not used in a week or more of history go behind ToolSearch: their names stay listed, and Claude loads one in a single call when it needs it | `holdBackTools`, and `keepTools` for names never held back | on |
+| Old tool output | Cleared from the context once a lot piles up (below) | `clearOldOutput` | on |
+| Compaction | A keyframe at a size you choose, not only at Claude Code's limit (see Compacting earlier, above) | `compactAt` (tokens) | off (0) |
+| Skills and agent types | Measured only: the pane says what this project has not used | | |
+
+Core tools (Read, Edit, Write, Bash, Grep, Glob, Agent, Skill, ToolSearch,
+TodoWrite, AskUserQuestion and a few more) are never held back, nor is
+anything without ToolSearch there to find it. Which tools are held back is
+decided as Claude Code lists them, once a session, so a change applies from
+the next one. In a live run on Claude Code 2.1.296, holding back six unused
+tools (Artifact alone was about 13k) took every request from 58.5k tokens to
+40.1k, with the prompt cache behaving exactly as without it.
+
+Use comes from a small record convo keeps per session (`usage/` in the
+project's history folder), seeded once from the turns git already holds.
+Agent types are judged only once a week of convo's own records exists, as
+older turns do not name them.
+
+The pane's Context section shows it all for the window:
+
+```
+Context · this window · $0.42
+  every request carries 31k of setup: skills 9.8k, system tools (estimated) 8.5k, custom agents 6.5k
+  held back 17k of tools unused here, behind ToolSearch: Artifact 11k, Workflow 2.0k, SendFeedback 2.0k, ScheduleWakeup 1.8k and 2 more
+  could also drop 9.8k: 490 skills unused here in the last 30 days
+    largest: dataviz 482, claude-api 361, …
+  conversation now 12k; tool output added 7.0k (Bash 6.0k, Read 1.0k)
+  cleared 39k of old tool output from the context (5 outputs, 1 time); git keeps it
+  compacts at Claude Code's limit, 967k, with a keyframe
+  81k in over 2 requests, 200 out
+  cache: 98% read from cache · no misses
+```
+
+It counts every model request as Claude Code reports it (main thread and
+subagents), takes sizes from `/context`'s own breakdown (counted locally, no
+tokens spent; with tools held back that breakdown leaves the system tools
+out, so convo estimates them at the rate an earlier session measured, and
+says so), and the cost from the status line, this window's share only. A
+request that re-caches what the one before it had cached is a cache miss:
+the pane names its turn, its size and the likely cause (a pause long enough
+for the cache to expire, another model, or a change at the start of the
+request, such as MCP servers connecting after the first one). The re-cache
+after a compaction or a clearing, and the first request of a window, are
+expected and counted apart.
+
+Ask Claude about your context, or to change any of it ("compact at 200k",
+"never hold back WebFetch"): its `context` tool reports the section and the
+settings, and asks you before it changes one.
+
+### Old tool output, cleared
 
 A test run, a log or a long file Claude read three turns ago still rides along
 with every request until the conversation compacts. Once such output adds up
@@ -229,42 +288,8 @@ back. "What Claude works from" is the newest compaction on this line: after
 it, Claude sees that keyframe (or Claude Code's own summary) and the turns
 since, not the turns before.
 
-Below the lines, the pane keeps a token ledger for the window:
-
-```
-Tokens · this window · $0.06
-  167k in over 2 requests, 153 out
-  every request carries 25k of setup: skills 9.8k, custom agents 6.5k, system tools 4.2k
-  conversation now 59k; tool output added 61 (Bash 61)
-  cache: 98% read from cache · no misses
-  cleared 39k of old tool output from the context (5 outputs, 1 time); git keeps it
-```
-
-Under the setup line, the pane also says how much of that setup this project
-could do without, judged on what Claude has actually used here:
-
-```
-  setup could drop 18k: 9 tools, 21 skills, 4 agents unused here in the last 30 days
-    largest: anthropic-skills:pptx 1.5k, CronCreate 1.3k, …
-```
-
-It only measures: nothing is held back. Skill and agent sizes come from
-Claude Code's own `/context` breakdown; built-in tools share the "system
-tools" total by the length of their descriptions. Use comes from a small
-record convo keeps per session (`usage/` in the project's history folder),
-seeded once from the turns git already holds. The tools no session can do
-without (Read, Edit, Write, Bash, Grep, Glob, Agent, Skill and a few more)
-and the general-purpose agent never count. Agent types are judged only once a
-week of convo's own records exists, as older turns do not name them.
-
-It counts every model request as Claude Code reports it (main thread and
-subagents), takes the setup and conversation sizes from `/context`'s own
-breakdown (counted locally, no tokens spent), and the cost from the status
-line, this window's share only. A request that re-caches what the one before
-it had cached is a cache miss: the pane names its turn, its size and the
-likely cause (a pause long enough for the cache to expire, another model, or
-a change at the start of the request). The re-cache after a compaction or a
-clearing, and the first request of a window, are expected and counted apart.
+Below the lines, the pane's **Context** section shows what the context
+manager is doing (next section).
 
 To look at the history yourself, use git directly, for example:
 
@@ -321,7 +346,7 @@ stood in for. `tests/e2e` runs the same hooks against real git in a throwaway
 home folder, with a scripted model and transcripts written the way Claude Code
 writes them: turns, a fork, a rewind, a keyframe and the turn after it, a
 native fallback, clearing old tool output, compacting at a set size,
-measuring what the setup could drop, a merge, recall across branches,
+holding back unused tools and the context tool, a merge, recall across branches,
 permission, a subagent, and spool recovery (a repeated flush, a corrupt file, a session that ended early).
 Each scenario runs in a process of its own. Node 22.6 or newer, or Bun.
 
@@ -370,7 +395,7 @@ afterwards.
 | `view.ts` | What the pane beside the chat shows, built from git, and its rows (`types/index.d.ts` declares it) |
 | `ledger.ts` | The token ledger and cache misses the pane shows |
 | `clearing.ts` | Which old tool outputs to clear, their stubs, and when it pays |
-| `setup.ts` | What the setup could drop: each session's use, and what went unused |
+| `setup.ts` | The setup: each session's use, which tools to hold back, and what else went unused |
 | `permission.ts` | Asking before reading beyond this conversation |
 | `redact.ts` | Masking secrets |
 

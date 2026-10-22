@@ -67,6 +67,9 @@ export type ConvoTrim = {
   tools: [string, number][]
   skills: [string, number][]
   agents: [string, number][]
+  /** Built-in tools convo held back behind ToolSearch, with what they would take in front. */
+  held: [string, number][]
+  heldTokens: number
   /** The days of use it is judged on (up to 30), and how many sessions' records. */
   days: number
   sessions: number
@@ -103,8 +106,11 @@ export type ConvoLedger = {
   last: Record<string, { at: number; model: string; input: number }>
   /** Old tool output convo cleared from the context: how often, how many outputs, and their tokens. */
   cleared?: { times: number; outputs: number; tokens: number }
-  /** What the setup could drop, measured only: nothing is held back. */
+  /** What the setup holds back, and what it could also drop. */
   trim?: ConvoTrim
+  /** Where the conversation compacts: convo's setting, and Claude Code's own limit. */
+  compactAt?: number
+  autoCompactAt?: number
 }
 
 declare module 'claude-code' {

@@ -1,6 +1,6 @@
 {
   "name": "convo",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "description": "Keeps every Claude Code conversation as git history: one commit per turn, a branch per session and subagent, keyframes in place of compaction, merge and recall by asking, all local and redacted.",
   "author": {
     "name": "Brainztechs"
@@ -14,6 +14,24 @@
       "title": "Compact at (tokens)",
       "description": "Compact with a keyframe once the context reaches this many tokens, setup included (50000 or more). 0 leaves compaction to Claude Code's own limit.",
       "default": 0
+    },
+    "clearOldOutput": {
+      "type": "boolean",
+      "title": "Clear old tool output",
+      "description": "Once a lot of old tool output piles up, replace it in the context with a stub pointing to git, as a turn ends.",
+      "default": true
+    },
+    "holdBackTools": {
+      "type": "boolean",
+      "title": "Hold back unused tools",
+      "description": "Put built-in tools this project has not used in a week or more of history behind ToolSearch; Claude loads one when it needs it.",
+      "default": true
+    },
+    "keepTools": {
+      "type": "string",
+      "title": "Always keep these tools",
+      "description": "Tool names never held back, separated by commas (for example: WebFetch, NotebookEdit).",
+      "default": ""
     }
   }
 }
