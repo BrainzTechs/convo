@@ -153,6 +153,11 @@ export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[]
   // The status line's cost is the session's, a resumed one's included: this window's share is what it rose by
   const cost = l.costUsd !== undefined ? l.costUsd - (l.costBase ?? 0) : undefined
   add(`Context · this window${cost !== undefined ? ` · $${cost.toFixed(2)}` : ''}`, 'title')
+  if (l.brief) {
+    const b = l.brief
+    const what = [b.pins ? `${b.pins} pin${b.pins === 1 ? '' : 's'}` : '', b.decisions ? `${b.decisions} decision${b.decisions === 1 ? '' : 's'}` : '', b.tasks ? `${b.tasks} open task${b.tasks === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ')
+    add(`  began with a brief from conversation ${b.from.slice(0, 8)}${what ? `: ${what}` : ''} (${k(b.tokens)})`, 'good')
+  }
   if (l.setup?.total) add(`  every request carries ${k(l.setup.total)} of setup: ${l.setup.parts.slice(0, 3).map(([name, n]) => `${name.toLowerCase()} ${k(n)}`).join(', ')}`, 'dim')
   for (const r of trimRows(l.trim)) add(r, r.startsWith('  held back') ? 'good' : 'dim')
   const tools = Object.entries(l.toolOutput).sort((a, b) => b[1] - a[1])

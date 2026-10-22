@@ -241,6 +241,46 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('a command in neverCondense reaches Claude whole', k.messages.flatMap(m => m.toolResults ?? [])[0]?.text === goTest)
   },
 
+  async brief(dir, check) {
+    const C = 'cccccccc-0000-4000-8000-000000000003'
+    const D = 'dddddddd-0000-4000-8000-000000000004'
+    const w = await world(dir)
+    await w.start(A)
+    await w.turn(FIRST, 'Noted.')
+    for (let i = 2; i <= 9; i++) await w.turn(`Step ${i}.`, 'Done.')
+    await w.timers()
+    check('no records refreshed before ten turns', !w.git('log', '--format=%s', `session/${A}`).includes('records:'))
+    await w.turn('Step 10.', 'Done.')
+    await w.timers()
+    const log = w.git('log', '--format=%s', `session/${A}`).split('\n')
+    check('after ten turns the records are brought up to date in the background, as a commit of their own', log[0] === 'records: turns 1–10', log.slice(0, 3).join(' | '))
+    check('and a turn after it continues the line', (await w.turn('Step 11.', 'Done.'), await w.timers(), w.git('log', '-1', '--format=%s', `session/${A}`)).startsWith('turn 11') && w.git('for-each-ref', 'refs/heads/rewound/') === '')
+
+    // A new session in this project: its first prompt carries the brief
+    const v = await world(dir)
+    await v.start(B)
+    await v.turn('What next?', 'Fixing transfers.')
+    const brief = v.lastContext.find(c => c.startsWith('# Where this project left off')) ?? ''
+    check('a new conversation begins with where the last one here left off', brief.includes(`conversation ${A.slice(0, 8)}`) && brief.includes('ledgerd runs on Go 1.23 only — they said "it must run on Go 1.23 only"') && brief.includes('Service is named ledgerd (turn 1)') && brief.includes('Its last turn is not in these notes yet') && brief.includes('turns 1–11'), brief)
+    check('the pane says so', (await import('../../hooks/ledger.ts')).ledgerRows({ ...v.ledger(), requests: 1 }, 200).map(r => r.text).join('\n').includes(`began with a brief from conversation ${A.slice(0, 8)}: 1 pin, 1 decision`), JSON.stringify(v.ledger()?.brief))
+    await v.turn('And then?', 'Docs.')
+    check('only the first prompt carries it', !v.lastContext.some(c => c.startsWith('# Where this project left off')))
+    // /clear: an empty conversation again, briefed from the last one with notes
+    v.clear(C)
+    await v.turn('Start over: what was decided?', 'Port and name.')
+    check('after /clear, the first prompt is briefed again', v.lastContext.some(c => c.startsWith('# Where this project left off')))
+    // A resumed conversation already has its turns: no brief
+    const r = await world(dir)
+    await r.start(D)
+    r.messages = [{ role: 'user', text: 'earlier', toolUses: [] }, { role: 'assistant', text: 'yes', toolUses: [] }]
+    await r.turn('Go on.', 'Going.')
+    check('a conversation that is not empty gets no brief', !r.lastContext.some(c => c.startsWith('# Where this project left off')))
+    const off = await world(join(dir, 'off'), {}, { brief: false })
+    await off.start(A)
+    await off.turn('Hi.', 'Hi.')
+    check('with the setting off, no brief', off.lastContext.length === 0)
+  },
+
   async fork(dir, check) {
     const w = await world(dir)
     await w.start(A)

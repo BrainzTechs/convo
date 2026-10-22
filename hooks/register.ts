@@ -28,7 +28,8 @@ import { ensureRepo, projectRoot } from './repo.ts'
 import { adoptOrphans, enqueue, flush, heartbeat } from './spool.ts'
 import { SUMMARY_OPENING, noticeCompaction, recordCompaction, rowsFor, useSession } from './session.ts'
 import { permit } from './permission.ts'
-import { buildCheckpoint, buildOwed } from './keyframes.ts'
+import { REFRESH_TURNS, briefSource, buildCheckpoint, buildOwed, refreshRecords } from './keyframes.ts'
+import { BRIEF_DAYS, renderBrief } from './brief.ts'
 import { branchList, mergeBranch, readTurn, recall, registerTools } from './tools.ts'
 import { buildView, emptyView, paneRows, type PaneRow } from './view.ts'
 import { addAgentRun, addClearing, addCondensed, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
@@ -144,7 +145,30 @@ let toolSearchSeen = false
 let toolRate: number | undefined
 
 /** The settings (/config, under convo), as the module was loaded with them. */
-const settings = { compactAt: 0, clearOldOutput: true, holdBackTools: true, keepTools: new Set<string>(), condenseOutput: true, neverCondense: new Set<string>() }
+const settings = { compactAt: 0, clearOldOutput: true, holdBackTools: true, keepTools: new Set<string>(), condenseOutput: true, neverCondense: new Set<string>(), brief: true }
+
+// ── The brief a new conversation starts with ─────────────────────────
+// The first prompt of an empty conversation (a new session, or after /clear)
+// carries where this project's last conversation left off, from the records
+// convo keeps; those are brought up to date in the background every ten turns.
+/** Sessions already briefed, or found not empty, in this process. */
+const briefed = new Set<string>()
+/** Main turns since the records were last brought up to date, and whether that is under way. */
+let turnsSinceRefresh = 0
+let refreshing = false
+
+/** The brief for this prompt, when it opens an empty conversation and an earlier one here has notes. */
+async function briefFor($: EngineInterface): Promise<string | undefined> {
+  if (!settings.brief || briefed.has(S.sid)) return undefined
+  briefed.add(S.sid)
+  if ((await $.session.messages()).length) return undefined
+  const src = await briefSource(ioOf($), S.sid, Date.now(), BRIEF_DAYS)
+  const b = src ? renderBrief(src) : undefined
+  if (!src || !b) return undefined
+  ledger = { ...(ledger ?? emptyLedger(Date.now())), brief: { from: src.sid, ...b.counts, tokens: tokensOf(b.text) } }
+  await saveLedger($)
+  return b.text
+}
 
 // ── Condensing tool output as it arrives ─────────────────────────────
 // A long log reaches Claude as its errors and failures, the rest counted
@@ -359,7 +383,7 @@ async function compactEarly($: EngineInterface): Promise<void> {
 }
 
 // ── The context tool: what the manager does, and changing its settings ─
-const SETTINGS = ['compactAt', 'clearOldOutput', 'holdBackTools', 'keepTools', 'condenseOutput', 'neverCondense'] as const
+const SETTINGS = ['compactAt', 'clearOldOutput', 'holdBackTools', 'keepTools', 'condenseOutput', 'neverCondense', 'brief'] as const
 type SettingKey = (typeof SETTINGS)[number]
 
 /** The settings as they stand, in a few lines. */
@@ -371,6 +395,7 @@ function settingsText(): string {
     `keepTools: ${settings.keepTools.size ? [...settings.keepTools].join(', ') : '(none)'}`,
     `condenseOutput: ${settings.condenseOutput ? 'on' : 'off'}`,
     `neverCondense: ${settings.neverCondense.size ? [...settings.neverCondense].join(', ') : '(none)'}`,
+    `brief: ${settings.brief ? 'on' : 'off'}`,
   ].join('\n')
 }
 
@@ -444,6 +469,7 @@ export const register: Register = (on, options) => {
   settings.keepTools = parseKeep(o.keepTools)
   settings.condenseOutput = o.condenseOutput !== false
   settings.neverCondense = parseKeep(o.neverCondense)
+  settings.brief = o.brief !== false
 
   on('session.start', async ($, e, next) => {
     const io = ioOf($)
@@ -717,7 +743,14 @@ export const register: Register = (on, options) => {
     } finally {
       $.ui.status(undefined)
     }
-    return next(extra ? { ...e, context: [...(e.context ?? []), extra] } : e)
+    let brief: string | undefined
+    try {
+      brief = await briefFor($)
+    } catch (err) {
+      $.ui.log(`convo: no brief for this conversation: ${String(err).slice(0, 200)}`, { to: 'debug' })
+    }
+    const context = [...(e.context ?? []), ...(brief ? [brief] : []), ...(extra ? [extra] : [])]
+    return next(context.length !== (e.context ?? []).length ? { ...e, context } : e)
   }).catch(($, e, next) => next(e))
 
   // The classic events name each session's transcript file exactly
@@ -834,6 +867,21 @@ export const register: Register = (on, options) => {
       lastFinished = turnNow
       // Clearing first, as it keeps every turn; the context's size after it is known only at the next request
       if (!(await clearOld($))) await compactEarly($)
+      // Every ten turns, the records are brought up to date in the background, for the next conversation's brief
+      turnsSinceRefresh += 1
+      if (settings.brief && S.gitOk && !refreshing && turnsSinceRefresh >= REFRESH_TURNS) {
+        refreshing = true
+        turnsSinceRefresh = 0
+        const io = ioOf($)
+        const sid = S.sid
+        $.clock.after(0, () =>
+          refreshRecords(io, sid)
+            .catch(err => $.ui.log(`convo: records not brought up to date: ${String(err).slice(0, 200)}`, { to: 'debug' }))
+            .finally(() => {
+              refreshing = false
+            }),
+        )
+      }
     }
     return result
   })

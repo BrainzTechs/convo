@@ -106,6 +106,8 @@ export type ConvoLedger = {
   last: Record<string, { at: number; model: string; input: number }>
   /** Old tool output convo cleared from the context: how often, how many outputs, and their tokens. */
   cleared?: { times: number; outputs: number; tokens: number }
+  /** The brief this conversation began with: the conversation it came from, what it carried, its tokens. */
+  brief?: { from: string; pins: number; decisions: number; tasks: number; tokens: number }
   /** Tool output condensed as it arrived: how many outputs, and their estimated tokens before and after. */
   condensed?: { outputs: number; before: number; after: number }
   /** What the setup holds back, and what it could also drop. */

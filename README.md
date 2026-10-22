@@ -8,7 +8,8 @@ at the turn it came from, and a rewind branches off the earlier turn while
 keeping the line you left. Ask Claude to bring a branch back and it merges
 it; ask about something from earlier and it looks it up.
 
-It also manages the context every request carries: built-in tools this
+A new conversation begins with where the last one here left off. It also
+manages the context every request carries: built-in tools this
 project does not use go behind ToolSearch, long tool output arrives condensed
 to its failures and errors, old tool output is cleared once it piles up (git
 keeps all of it word for word), and you can have it compact earlier than
@@ -164,6 +165,7 @@ with safe defaults:
 | New tool output | Condensed as it arrives: a long test, build or log output reaches Claude as its errors and failures, the rest counted (below) | `condenseOutput`, and `neverCondense` for commands always shown whole | on |
 | Old tool output | Cleared from the context once a lot piles up (below) | `clearOldOutput` | on |
 | Compaction | A keyframe at a size you choose, not only at Claude Code's limit (see Compacting earlier, above) | `compactAt` (tokens) | off (0) |
+| A new conversation | Begins with a brief of where this project's last conversation left off (below) | `brief` | on |
 | Skills and agent types | Measured only: the pane says what this project has not used | | |
 
 Core tools (Read, Edit, Write, Bash, Grep, Glob, Agent, Skill, ToolSearch,
@@ -209,6 +211,20 @@ expected and counted apart.
 Ask Claude about your context, or to change any of it ("compact at 200k",
 "never hold back WebFetch"): its `context` tool reports the section and the
 settings, and asks you before it changes one.
+
+### A new conversation, briefed
+
+The first prompt of an empty conversation (a new session, or after `/clear`;
+never a resume or a fork, which have their turns) carries a short brief of
+where the most recent conversation in this project, within two weeks, left
+off: where it stood, the pins, the live decisions newest first, and the open
+tasks, under about 1,200 tokens, with the way to read any of its turns. It
+is rendered from the records convo keeps, with no model call; those records
+are brought up to date in the background every ten turns, by one small Haiku
+call committed as `records: turns a–b`. The idea is claude-mem's; convo's
+records are the structured ones keyframes already use. In a live run, asked
+without tools what it knew of earlier work here, Claude named the last
+conversation, its date, what it ran and that nothing was left open.
 
 ### New tool output, condensed
 
@@ -376,7 +392,8 @@ stood in for. `tests/e2e` runs the same hooks against real git in a throwaway
 home folder, with a scripted model and transcripts written the way Claude Code
 writes them: turns, a fork, a rewind, a keyframe and the turn after it, a
 native fallback, clearing old tool output, compacting at a set size,
-holding back unused tools and the context tool, condensing tool output, a merge, recall across branches,
+holding back unused tools and the context tool, condensing tool output, the
+brief a new conversation begins with, a merge, recall across branches,
 permission, a subagent, and spool recovery (a repeated flush, a corrupt file, a session that ended early).
 Each scenario runs in a process of its own. Node 22.6 or newer, or Bun.
 
@@ -426,6 +443,7 @@ afterwards.
 | `ledger.ts` | The token ledger and cache misses the pane shows |
 | `clearing.ts` | Which old tool outputs to clear, their stubs, and when it pays |
 | `condense.ts` | Condensing tool output as it arrives: failures kept, the rest counted |
+| `brief.ts` | The brief a new conversation begins with |
 | `setup.ts` | The setup: each session's use, which tools to hold back, and what else went unused |
 | `permission.ts` | Asking before reading beyond this conversation |
 | `redact.ts` | Masking secrets |

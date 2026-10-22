@@ -50,6 +50,8 @@ export class World {
   pluginCompactions: any[] = []
   /** What convo answered when Claude Code described each tool, by name. */
   described = new Map<string, { description: string; isDeferred?: boolean }>()
+  /** What the last prompt carried beside its text: the context hooks added. */
+  lastContext: string[] = []
   /** Settings convo changed ($.config.set). */
   configSets: { key: string; value: unknown }[] = []
   logs: string[] = []
@@ -284,7 +286,8 @@ export class World {
    */
   async turn(prompt: string, answer: string, o: { parent?: string | null; tools?: { name: string; input: unknown; output: string }[]; agents?: { id: string; prompt: string; answer: string }[] } = {}): Promise<void> {
     const turnId = randomUUID()
-    await this.fire('prompt.submit', { text: prompt }, e => e)
+    const submitted = await this.fire('prompt.submit', { text: prompt }, e => e)
+    this.lastContext = submitted?.context ?? []
     await this.fire('turn.start', { turnId, text: prompt }, () => ({}))
     // As Claude Code does, what the hooks hand on is what the conversation keeps
     const append = async (door: string, type: 'user' | 'assistant', content: Block[], parent?: string | null, agentId?: string): Promise<Block[]> => {
@@ -337,6 +340,12 @@ export class World {
     this.sid = newSid
     writeFileSync(this.transcript(newSid), rows)
     this.tails.set(newSid, this.tails.get(from) ?? null)
+  }
+
+  /** /clear: a new session id and an empty conversation; convo learns of it from the next prompt. */
+  clear(sid: string): void {
+    this.sid = sid
+    this.messages = []
   }
 
   /** Switches the session events name (a resume, or going back to another conversation). */

@@ -1,6 +1,6 @@
 {
   "name": "convo",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Keeps every Claude Code conversation as git history: one commit per turn, a branch per session and subagent, keyframes in place of compaction, merge and recall by asking, all local and redacted.",
   "author": {
     "name": "Brainztechs"
@@ -44,6 +44,12 @@
       "title": "Never condense these",
       "description": "Commands or tools whose output always reaches Claude whole, separated by commas (for example: make, docker).",
       "default": ""
+    },
+    "brief": {
+      "type": "boolean",
+      "title": "Start with a brief",
+      "description": "A new conversation (or one after /clear) starts with where this project's last conversation left off: its pins, decisions and open tasks, from the notes convo keeps.",
+      "default": true
     }
   }
 }

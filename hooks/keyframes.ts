@@ -114,3 +114,55 @@ export function buildOwed(io: Io, timeoutMs?: number): Promise<void> {
 /** How a keyframe is framed when it rides a prompt beside the native summary (fallback 2). */
 export const besideSummary = (text: string): string =>
   `convo keeps a structured checkpoint of this conversation beside Claude Code's own summary: the decisions, assumptions, tasks and pins recorded so far, each with the turn it came from. Where the two differ, the checkpoint's records are the more exact.\n\n${text}`
+
+/** Turns a session may run past its records before they are brought up to date in the background. */
+export const REFRESH_TURNS = 10
+
+/**
+ * Brings a session's records up to date with the turns past them, and
+ * commits records.json alone (no keyframe, nothing Claude reads): so the
+ * next conversation's brief, and the next keyframe, start from fresh notes.
+ * Nothing to do under REFRESH_TURNS new turns. Returns how many turns it
+ * covered.
+ */
+export function refreshRecords(io: Io, sid: string): Promise<number> {
+  return exclusive(async () => {
+    await flushAll(io)
+    const ref = refs.session(sid)
+    const tip = await revOf(io, ref)
+    if (!tip) return 0
+    const stored = await git(io, ['show', `${tip}:records.json`])
+    const through = parseRecords(stored.ok ? stored.out : undefined).throughTurn
+    const ls = await git(io, ['ls-tree', '--name-only', tip, 'turns/'])
+    const newer = (ls.ok && ls.out ? ls.out.split('\n') : []).filter(p => (turnNumberOf(p) ?? 0) > through).length
+    if (newer < REFRESH_TURNS) return 0
+    const { records, docs, lastTurn } = await freshRecords(io, tip, { timeoutMs: 120_000 })
+    if (!docs.length) return 0
+    await commitItem(io, {
+      ref,
+      files: [{ path: 'records.json', text: recordsJson(records) }],
+      expectTip: tip,
+      message: `records: turns ${docs[0]?.n ?? '?'}–${lastTurn}\n\nSession: ${sid}\nKind: records\nRecords: ${records.records.filter(x => !x.supersededBy).length}\n`,
+      at: new Date().toISOString(),
+    }, `${S.root}/index/${sid}-records.idx`)
+    return docs.length
+  })
+}
+
+/** The most recent other conversation in this project within `days`, with its records and its last turn. */
+export async function briefSource(io: Io, sid: string, now: number, days: number): Promise<{ sid: string; at: number; records: Records; lastTurn: number } | undefined> {
+  const r = await git(io, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:strip=3) %(objectname) %(committerdate:unix)', 'refs/heads/session/'])
+  for (const line of (r.ok ? r.out.split('\n') : []).slice(0, 20)) {
+    const [other = '', tip = '', when = '0'] = line.split(' ')
+    const at = Number(when) * 1000
+    if (!other || other === sid || !tip) continue
+    if (now - at > days * 24 * 60 * 60_000) return undefined
+    const stored = await git(io, ['show', `${tip}:records.json`])
+    const records = parseRecords(stored.ok ? stored.out : undefined)
+    const ls = await git(io, ['ls-tree', '--name-only', tip, 'turns/'])
+    const lastTurn = Math.max(0, ...(ls.ok && ls.out ? ls.out.split('\n') : []).map(p => turnNumberOf(p) ?? 0))
+    // The most recent conversation with notes; one too short to have any is passed over
+    if (records.records.length || records.state) return { sid: other, at, records, lastTurn }
+  }
+  return undefined
+}
