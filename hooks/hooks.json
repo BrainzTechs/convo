@@ -1,0 +1,4 @@
+{
+  "description": "convo hooks module",
+  "modules": ["./register.ts"]
+}
