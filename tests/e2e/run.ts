@@ -145,13 +145,14 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     await w.timers()
     check("convo keeps a record of the session's use", existsSync(`${w.root}/usage/${A}.json`))
     rmSync(`${w.root}/usage`, { recursive: true })
-    // Session B, a new process' worth later: git is read once for what A used; one record is 8 days old
+    // Session B, a new process' worth later: git is read once for what A used, at its first turn; one record is 8 days old
     await w.start(B)
     await w.timers()
-    check('git was read once for the use it holds', existsSync(`${w.root}/usage/git.json`) && JSON.stringify(JSON.parse(readFileSync(`${w.root}/usage/git.json`, 'utf8'))).includes('docx'), existsSync(`${w.root}/usage/git.json`) ? readFileSync(`${w.root}/usage/git.json`, 'utf8') : 'none')
     const week = Date.now() - 8 * 24 * 60 * 60_000
+    mkdirSync(`${w.root}/usage`, { recursive: true })
     writeFileSync(`${w.root}/usage/cccccccc-old.json`, JSON.stringify({ started: week, tools: {}, skills: {}, agents: {} }))
     await w.turn('List the files.', 'Two files.', { tools: [{ name: 'Bash', input: { command: 'ls' }, output: 'a\nb' }, { name: 'Skill', input: { skill: 'anthropic-skills:pdf' }, output: 'Skill loaded.' }], agents: [{ id: 'agent0009', prompt: 'Count them.', answer: 'Two.' }] })
+    check('git was read once for the use it holds, before the first judgement', existsSync(`${w.root}/usage/git.json`) && JSON.stringify(JSON.parse(readFileSync(`${w.root}/usage/git.json`, 'utf8'))).includes('docx'), existsSync(`${w.root}/usage/git.json`) ? readFileSync(`${w.root}/usage/git.json`, 'utf8') : 'none')
     const t = w.ledger()?.trim
     check('tools unused here, by their share of the 7k: CronCreate, WebFetch, NotebookEdit; Bash and Read were used', JSON.stringify(t?.tools) === JSON.stringify([['CronCreate', 1615], ['WebFetch', 1077], ['NotebookEdit', 538]]), JSON.stringify(t?.tools))
     check('skills: pptx only (docx from git, pdf from this session)', JSON.stringify(t?.skills) === JSON.stringify([['anthropic-skills:pptx', 600]]), JSON.stringify(t?.skills))

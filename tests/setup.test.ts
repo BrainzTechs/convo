@@ -54,6 +54,7 @@ describe('what the setup could drop', () => {
       '    largest: CronCreate 3.0k, anthropic-skills:pptx 1.5k, NotebookEdit 1.0k',
     ])
     expect(trimRows({ ...t, days: 30, agentsCounted: true })[0]).toBe('  setup could drop 18k: 2 tools, 1 skill unused here in the last 30 days')
+    expect(trimRows({ ...t, days: 0 })[0]).toBe('  setup could drop 18k: 2 tools, 1 skill unused here yet (convo has seen under a day here) (agents counted after a week)')
     expect(trimRows({ ...t, tokens: 400 })).toEqual([])
   })
 })

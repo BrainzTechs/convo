@@ -172,7 +172,11 @@ async function countTurn($: EngineInterface, agentId: string | undefined, rows: 
           toolSizesDirty = false
           await $.store.set('tool-sizes', toolSizes)
         }
-        if (!window || now - window.at > 10 * 60_000) window = { at: now, w: await usedInWindow(ioOfStatic, now, usage) }
+        if (!window || now - window.at > 10 * 60_000) {
+          // Judged on this project's use: what git holds from before convo kept records is read first, once
+          await backfillUsage(ioOfStatic, now).catch(err => $.ui.log(`convo: no use history from git: ${String(err).slice(0, 200)}`, { to: 'debug' }))
+          window = { at: now, w: await usedInWindow(ioOfStatic, now, usage) }
+        }
         else window = { at: window.at, w: { ...window.w, used: { tools: new Set([...window.w.used.tools, ...Object.keys(usage.tools)]), skills: new Set([...window.w.used.skills, ...Object.keys(usage.skills)]), agents: new Set([...window.w.used.agents, ...Object.keys(usage.agents)]) } } }
         const b = u.context.breakdown
         l.trim = setupSavings({
@@ -308,8 +312,6 @@ export const register: Register = (on, options) => {
       $.clock.after(5000, () => adoptOrphans(io))
       $.clock.every(300_000, () => adoptOrphans(io))
       await registerTools(io)
-      // What the setup could drop is judged on this project's use: git's record of it is read once
-      $.clock.after(3000, () => backfillUsage(io, Date.now()).catch(err => $.ui.log(`convo: no use history from git: ${String(err).slice(0, 200)}`, { to: 'debug' })))
       // The pane follows the history: after each flush, and every 30 s for other sessions' moves
       $.clock.every(2000, () => publish($))
       $.clock.every(30_000, () => publish($, true))

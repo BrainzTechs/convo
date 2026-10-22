@@ -116,7 +116,7 @@ export function trimRows(t: ConvoTrim | undefined): string[] {
   if (!t || t.tokens < 1000) return []
   const n = (xs: readonly unknown[], one: string, many: string): string => `${xs.length} ${xs.length === 1 ? one : many}`
   const kinds = [t.tools.length ? n(t.tools, 'tool', 'tools') : '', t.skills.length ? n(t.skills, 'skill', 'skills') : '', t.agents.length ? n(t.agents, 'agent', 'agents') : ''].filter(Boolean).join(', ')
-  const when = t.days >= 30 ? 'in the last 30 days' : `in the ${t.days === 1 ? 'day' : `${t.days} days`} convo has seen`
+  const when = t.days >= 30 ? 'in the last 30 days' : t.days < 1 ? 'yet (convo has seen under a day here)' : `in the ${t.days === 1 ? 'day' : `${t.days} days`} convo has seen`
   const largest = [...t.tools, ...t.skills, ...t.agents].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, tokens]) => `${name} ${k(tokens)}`).join(', ')
   return [
     `  setup could drop ${k(t.tokens)}: ${kinds} unused here ${when}${t.agentsCounted ? '' : ' (agents counted after a week)'}`,
