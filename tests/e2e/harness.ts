@@ -31,6 +31,8 @@ export type WorldOptions = {
   answer?: string
   /** Where transcripts go (Claude Code's config folder); default <home>/.claude. Lets a run seed history in a real home without touching its transcripts. */
   configDir?: string
+  /** The setup Claude Code lists: built-in tools (described at the start of a session), skills and agent types with their tokens. */
+  setup?: { tools: { name: string; description: string }[]; skills: { name: string; tokens: number }[]; agents: { agentType: string; tokens: number }[] }
 }
 
 export class World {
@@ -182,7 +184,10 @@ export class World {
           { name: 'System prompt', tokens: 3000, kind: 'used' },
           { name: 'System tools', tokens: 7000, kind: 'used' },
           { name: 'Messages', tokens: Math.max(0, (this.cached.get('main') ?? 0) - 10_000), kind: 'used' },
-        ] } },
+        ], ...(this.o.setup ? {
+          skills: { totalSkills: this.o.setup.skills.length, includedSkills: this.o.setup.skills.length, tokens: this.o.setup.skills.reduce((s, x) => s + x.tokens, 0), skillFrontmatter: this.o.setup.skills.map(x => ({ ...x, source: 'plugin' })) },
+          agents: this.o.setup.agents.map(a => ({ ...a, source: 'built-in' })),
+        } : {}) } },
         rateLimits: [],
         cost: { usd: 0.01 * (this.cached.get('main') ?? 0) / 1000 },
       }),
@@ -232,6 +237,8 @@ export class World {
     this.sid = sid
     mkdirSync(this.transcriptDir, { recursive: true })
     await this.fire('session.start', { cwd: this.o.cwd, surface: null, isInteractive }, () => ({}))
+    // Claude Code describes each tool once, as it first lists them
+    for (const t of this.o.setup?.tools ?? []) await this.fire('tool.describe', { tool: t.name, description: t.description, provider: { plugin: 'engine', tier: 'core' } }, e => ({ description: e.description }))
   }
 
   /** The view convo published for its pane. */

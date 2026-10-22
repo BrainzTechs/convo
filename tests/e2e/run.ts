@@ -7,7 +7,7 @@
 //   (bun tests/e2e/run.ts works too)
 
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { World } from './harness.ts'
@@ -129,6 +129,36 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('a keyframe that fails is skipped, not replaced by a native summary', v.pluginCompactions.length === 1 && typeof v.pluginCompactions[0]?.skip === 'string' && v.messages.length === 8, JSON.stringify({ c: v.pluginCompactions, n: v.messages.length }))
     await v.turn('Ok?', 'Ok.')
     check('and not tried again until the conversation has grown well past it', v.pluginCompactions.length === 1)
+  },
+
+  async setup(dir, check) {
+    const setup = {
+      tools: [['Bash', 4000], ['Read', 3000], ['NotebookEdit', 1000], ['WebFetch', 2000], ['CronCreate', 3000]].map(([name, n]) => ({ name: String(name), description: 'd'.repeat(Number(n)) })),
+      skills: [{ name: 'anthropic-skills:docx', tokens: 500 }, { name: 'anthropic-skills:pdf', tokens: 400 }, { name: 'anthropic-skills:pptx', tokens: 600 }],
+      agents: [{ agentType: 'general-purpose', tokens: 300 }, { agentType: 'Explore', tokens: 400 }, { agentType: 'Plan', tokens: 350 }],
+    }
+    // Session A: history from before convo kept use records; only git has it
+    const w = await world(dir, { setup })
+    await w.start(A)
+    await w.turn('Read the config.', 'Port 8080.', { tools: [{ name: 'Read', input: { file_path: '/p/config.toml' }, output: 'port = 8080' }] })
+    await w.turn('Make it a document.', 'Done.', { tools: [{ name: 'Skill', input: { skill: 'docx' }, output: 'Skill loaded.' }] })
+    await w.timers()
+    check("convo keeps a record of the session's use", existsSync(`${w.root}/usage/${A}.json`))
+    rmSync(`${w.root}/usage`, { recursive: true })
+    // Session B, a new process' worth later: git is read once for what A used; one record is 8 days old
+    await w.start(B)
+    await w.timers()
+    check('git was read once for the use it holds', existsSync(`${w.root}/usage/git.json`) && JSON.stringify(JSON.parse(readFileSync(`${w.root}/usage/git.json`, 'utf8'))).includes('docx'), existsSync(`${w.root}/usage/git.json`) ? readFileSync(`${w.root}/usage/git.json`, 'utf8') : 'none')
+    const week = Date.now() - 8 * 24 * 60 * 60_000
+    writeFileSync(`${w.root}/usage/cccccccc-old.json`, JSON.stringify({ started: week, tools: {}, skills: {}, agents: {} }))
+    await w.turn('List the files.', 'Two files.', { tools: [{ name: 'Bash', input: { command: 'ls' }, output: 'a\nb' }, { name: 'Skill', input: { skill: 'anthropic-skills:pdf' }, output: 'Skill loaded.' }], agents: [{ id: 'agent0009', prompt: 'Count them.', answer: 'Two.' }] })
+    const t = w.ledger()?.trim
+    check('tools unused here, by their share of the 7k: CronCreate, WebFetch, NotebookEdit; Bash and Read were used', JSON.stringify(t?.tools) === JSON.stringify([['CronCreate', 1615], ['WebFetch', 1077], ['NotebookEdit', 538]]), JSON.stringify(t?.tools))
+    check('skills: pptx only (docx from git, pdf from this session)', JSON.stringify(t?.skills) === JSON.stringify([['anthropic-skills:pptx', 600]]), JSON.stringify(t?.skills))
+    check('agent types, with a week of records: Explore and Plan (a subagent ran as general-purpose)', t?.agentsCounted === true && JSON.stringify(t.agents) === JSON.stringify([['Explore', 400], ['Plan', 350]]), JSON.stringify(t))
+    check('in all', t?.tokens === 4580, String(t?.tokens))
+    const text = (await import('../../hooks/ledger.ts')).ledgerRows(w.ledger(), 200).map(r => r.text).join('\n')
+    check('the pane says it, and nothing was held back', text.includes('setup could drop 4.6k: 3 tools, 1 skill, 2 agents unused here in the 8 days convo has seen') && text.includes('largest: CronCreate 1.6k'), text)
   },
 
   async fork(dir, check) {

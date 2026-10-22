@@ -33,6 +33,7 @@ import { branchList, mergeBranch, readTurn, recall, registerTools } from './tool
 import { buildView, emptyView, paneRows, type PaneRow } from './view.ts'
 import { addAgentRun, addClearing, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
 import { applyClearing, planClearing, shouldClear } from './clearing.ts'
+import { addUsage, backfillUsage, emptyUsage, loadUsage, saveUsage, setupSavings, usedInWindow, type Usage } from './setup.ts'
 import type { ConvoLedger } from '../types/index.d.ts'
 
 /**
@@ -124,19 +125,63 @@ function toolOutputOf(rows: readonly Row[]): Record<string, number> {
   return out
 }
 
+// ── What the setup could drop (measured only) ─────────────────────────
+/** Built-in tools listed in front, each with its description's length; kept in the store, as tool.describe fires once a process. */
+let toolSizes: Record<string, number> = {}
+let toolSizesDirty = false
+/** This session's use of tools, skills and agent types, and the session it belongs to. */
+let usage: Usage = emptyUsage(Date.now())
+let usageSid = ''
+/** What the project used in the window, read from the records at most every ten minutes. */
+let window: { at: number; w: Awaited<ReturnType<typeof usedInWindow>> } | undefined
+
+/** This session's use record, started or picked up again when the session changed (/clear, /resume, a fork). */
+async function usageFor(sid: string): Promise<Usage> {
+  if (usageSid !== sid) {
+    usageSid = sid
+    usage = (await loadUsage(ioOfStatic, sid)) ?? emptyUsage(Date.now())
+    window = undefined
+  }
+  return usage
+}
+/** The Io the usage records go through; set at session start. */
+let ioOfStatic: Io
+
 /**
  * A finished turn in the ledger: the tool output it added, a subagent's run,
  * and for the main thread the setup and conversation sizes /context reports
- * (counted locally, no tokens spent) and the status line's cost.
+ * (counted locally, no tokens spent), the status line's cost, and what the
+ * setup could drop.
  */
 async function countTurn($: EngineInterface, agentId: string | undefined, rows: readonly Row[]): Promise<void> {
   try {
     let l = addToolOutput(ledger ?? emptyLedger(Date.now()), toolOutputOf(rows))
+    const now = Date.now()
+    if (S.gitOk) {
+      usage = addUsage(await usageFor(S.sid), rows, now)
+      await saveUsage(ioOfStatic, S.sid, usage)
+    }
     if (agentId) l = addAgentRun(l)
     else {
       turnsSince += 1
-      const usage = await $.session.usage({ breakdown: 'summary' })
-      l = { ...l, ...readBreakdown(usage.context.breakdown?.categories ?? []), ...(usage.cost ? { costUsd: usage.cost.usd } : {}) }
+      const u = await $.session.usage({ breakdown: 'summary' })
+      const categories = u.context.breakdown?.categories ?? []
+      l = { ...l, ...readBreakdown(categories), ...(u.cost ? { costUsd: u.cost.usd } : {}) }
+      if (S.gitOk) {
+        if (toolSizesDirty) {
+          toolSizesDirty = false
+          await $.store.set('tool-sizes', toolSizes)
+        }
+        if (!window || now - window.at > 10 * 60_000) window = { at: now, w: await usedInWindow(ioOfStatic, now, usage) }
+        else window = { at: window.at, w: { ...window.w, used: { tools: new Set([...window.w.used.tools, ...Object.keys(usage.tools)]), skills: new Set([...window.w.used.skills, ...Object.keys(usage.skills)]), agents: new Set([...window.w.used.agents, ...Object.keys(usage.agents)]) } } }
+        const b = u.context.breakdown
+        l.trim = setupSavings({
+          tools: Object.entries(toolSizes).map(([name, chars]) => ({ name, chars })),
+          toolTokens: categories.find(c => /^system tools$/i.test(c.name))?.tokens ?? 0,
+          skills: (b?.skills?.skillFrontmatter ?? []).map(s => ({ name: s.name, tokens: s.tokens })),
+          agents: (b?.agents ?? []).map(a => ({ name: a.agentType, tokens: a.tokens })),
+        }, window.w.used, window.w)
+      }
     }
     ledger = l
     await saveLedger($)
@@ -238,6 +283,9 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const io = ioOf($)
+    ioOfStatic = io
+    const kept = await $.store.get('tool-sizes')
+    if (kept && typeof kept === 'object' && !Object.keys(toolSizes).length) toolSizes = kept as Record<string, number>
     const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
     S.cwd = e.cwd
     S.root = home ? await projectRoot(io, home, e.cwd) : ''
@@ -260,6 +308,8 @@ export const register: Register = (on, options) => {
       $.clock.after(5000, () => adoptOrphans(io))
       $.clock.every(300_000, () => adoptOrphans(io))
       await registerTools(io)
+      // What the setup could drop is judged on this project's use: git's record of it is read once
+      $.clock.after(3000, () => backfillUsage(io, Date.now()).catch(err => $.ui.log(`convo: no use history from git: ${String(err).slice(0, 200)}`, { to: 'debug' })))
       // The pane follows the history: after each flush, and every 30 s for other sessions' moves
       $.clock.every(2000, () => publish($))
       $.clock.every(30_000, () => publish($, true))
@@ -277,6 +327,19 @@ export const register: Register = (on, options) => {
     clearingOff = e.isInteractive ? '' : 'a plugin cannot start a compaction outside an interactive session'
     return next(e)
   })
+
+  // Each built-in tool's description as Claude Code lists it, for the share of the setup it takes; nothing is changed
+  on('tool.describe', async ($, e, next) => {
+    const r = await next(e)
+    const provider = e.provider as { plugin?: string }
+    const deferred = r.isDeferred === undefined ? e.isDeferred === true : r.isDeferred === true
+    if (provider.plugin === 'engine') {
+      if (deferred) delete toolSizes[e.tool]
+      else toolSizes[e.tool] = r.description.length
+      toolSizesDirty = true
+    }
+    return r
+  }).catch(($, e, next) => next(e))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     if (e.origin.kind === 'person') await $.store.set('pane-closed', true)

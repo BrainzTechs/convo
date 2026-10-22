@@ -240,6 +240,23 @@ Tokens · this window · $0.06
   cleared 39k of old tool output from the context (5 outputs, 1 time); git keeps it
 ```
 
+Under the setup line, the pane also says how much of that setup this project
+could do without, judged on what Claude has actually used here:
+
+```
+  setup could drop 18k: 9 tools, 21 skills, 4 agents unused here in the last 30 days
+    largest: anthropic-skills:pptx 1.5k, CronCreate 1.3k, …
+```
+
+It only measures: nothing is held back. Skill and agent sizes come from
+Claude Code's own `/context` breakdown; built-in tools share the "system
+tools" total by the length of their descriptions. Use comes from a small
+record convo keeps per session (`usage/` in the project's history folder),
+seeded once from the turns git already holds. The tools no session can do
+without (Read, Edit, Write, Bash, Grep, Glob, Agent, Skill and a few more)
+and the general-purpose agent never count. Agent types are judged only once a
+week of convo's own records exists, as older turns do not name them.
+
 It counts every model request as Claude Code reports it (main thread and
 subagents), takes the setup and conversation sizes from `/context`'s own
 breakdown (counted locally, no tokens spent), and the cost from the status
@@ -303,7 +320,8 @@ bash convo/live-test.sh                                      # all of it, with r
 stood in for. `tests/e2e` runs the same hooks against real git in a throwaway
 home folder, with a scripted model and transcripts written the way Claude Code
 writes them: turns, a fork, a rewind, a keyframe and the turn after it, a
-native fallback, clearing old tool output, compacting at a set size, a merge, recall across branches,
+native fallback, clearing old tool output, compacting at a set size,
+measuring what the setup could drop, a merge, recall across branches,
 permission, a subagent, and spool recovery (a repeated flush, a corrupt file, a session that ended early).
 Each scenario runs in a process of its own. Node 22.6 or newer, or Bun.
 
@@ -352,6 +370,7 @@ afterwards.
 | `view.ts` | What the pane beside the chat shows, built from git, and its rows (`types/index.d.ts` declares it) |
 | `ledger.ts` | The token ledger and cache misses the pane shows |
 | `clearing.ts` | Which old tool outputs to clear, their stubs, and when it pays |
+| `setup.ts` | What the setup could drop: each session's use, and what went unused |
 | `permission.ts` | Asking before reading beyond this conversation |
 | `redact.ts` | Masking secrets |
 

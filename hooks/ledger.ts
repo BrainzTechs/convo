@@ -3,7 +3,7 @@
 // each finished turn's tool output, and /context's breakdown; the pane shows
 // ledgerRows.
 
-import type { ConvoLedger, ConvoMiss } from '../types/index.d.ts'
+import type { ConvoLedger, ConvoMiss, ConvoTrim } from '../types/index.d.ts'
 import type { PaneRow } from './view.ts'
 import { wrapRow } from './view.ts'
 
@@ -111,6 +111,19 @@ export function k(n: number): string {
   return String(Math.round(n))
 }
 
+/** What the setup could drop, in a line and the largest items; nothing when it could drop little. */
+export function trimRows(t: ConvoTrim | undefined): string[] {
+  if (!t || t.tokens < 1000) return []
+  const n = (xs: readonly unknown[], one: string, many: string): string => `${xs.length} ${xs.length === 1 ? one : many}`
+  const kinds = [t.tools.length ? n(t.tools, 'tool', 'tools') : '', t.skills.length ? n(t.skills, 'skill', 'skills') : '', t.agents.length ? n(t.agents, 'agent', 'agents') : ''].filter(Boolean).join(', ')
+  const when = t.days >= 30 ? 'in the last 30 days' : `in the ${t.days === 1 ? 'day' : `${t.days} days`} convo has seen`
+  const largest = [...t.tools, ...t.skills, ...t.agents].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, tokens]) => `${name} ${k(tokens)}`).join(', ')
+  return [
+    `  setup could drop ${k(t.tokens)}: ${kinds} unused here ${when}${t.agentsCounted ? '' : ' (agents counted after a week)'}`,
+    `    largest: ${largest}`,
+  ]
+}
+
 /** The pane's token section. */
 export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[] {
   if (!l || !l.requests) return []
@@ -125,6 +138,7 @@ export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[]
   add(`Tokens · this window${cost !== undefined ? ` · $${cost.toFixed(2)}` : ''}`, 'title')
   add(`  ${k(input)} in over ${l.requests} request${l.requests === 1 ? '' : 's'}, ${k(l.output)} out`)
   if (l.setup?.total) add(`  every request carries ${k(l.setup.total)} of setup: ${l.setup.parts.slice(0, 3).map(([name, n]) => `${name.toLowerCase()} ${k(n)}`).join(', ')}`, 'dim')
+  for (const r of trimRows(l.trim)) add(r, 'dim')
   const tools = Object.entries(l.toolOutput).sort((a, b) => b[1] - a[1])
   const toolTotal = tools.reduce((t, [, n]) => t + n, 0)
   if (l.conversation || toolTotal) {

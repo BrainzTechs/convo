@@ -61,6 +61,19 @@ export type ConvoMiss = {
 }
 
 /** Where this window's tokens went, request by request, as the model's usage reported them. */
+/** What every request's setup could drop: what this project has not used lately, largest first, in tokens. */
+export type ConvoTrim = {
+  tokens: number
+  tools: [string, number][]
+  skills: [string, number][]
+  agents: [string, number][]
+  /** The days of use it is judged on (up to 30), and how many sessions' records. */
+  days: number
+  sessions: number
+  /** Whether agent types were judged: only once convo's own records span a week. */
+  agentsCounted: boolean
+}
+
 export type ConvoLedger = {
   /** When counting began (this window, or the reload that started it). */
   since: number
@@ -90,6 +103,8 @@ export type ConvoLedger = {
   last: Record<string, { at: number; model: string; input: number }>
   /** Old tool output convo cleared from the context: how often, how many outputs, and their tokens. */
   cleared?: { times: number; outputs: number; tokens: number }
+  /** What the setup could drop, measured only: nothing is held back. */
+  trim?: ConvoTrim
 }
 
 declare module 'claude-code' {
