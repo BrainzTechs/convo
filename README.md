@@ -319,10 +319,23 @@ to ask.
 
 A subagent's branch merges back on its own: the turn that ran it becomes a
 commit with the subagent's branch as a second parent (a `Merged-Agents`
-trailer names it), and its turns are searchable from the session. Not merged:
-background subagents still running when the turn ends, and a subagent started
-in the first turn after a rewind (its branch grew from the line the rewind
-left, which stays separate).
+trailer names it), and its turns are searchable from the session. A subagent
+run in the background, still going when the turn that launched it ends,
+merges into the next turn of that conversation to end, usually the one its
+result arrives in:
+
+```
+*   turn 3: Another Claude session sent a message:   ← its result arrives; the merge
+|\
+| * turn 1: Run `ls -la` in …                        ← the subagent's run
+* | turn 2: …
+|/
+* turn 1: Use the Agent tool with subagent_type Explore …
+```
+
+Not merged: a subagent started in the first turn after a rewind (its branch
+grew from the line the rewind left, which stays separate), and one that
+finishes after its conversation was cleared or switched.
 
 ## Looking at it
 
@@ -410,7 +423,7 @@ writes them: turns, a fork, a rewind, a keyframe and the turn after it, a
 native fallback, clearing old tool output, compacting at a set size,
 holding back unused tools and the context tool, condensing tool output, the
 brief a new conversation begins with, the usage history, a merge, recall across branches,
-permission, a subagent, and spool recovery (a repeated flush, a corrupt file, a session that ended early).
+permission, a subagent and a background one, and spool recovery (a repeated flush, a corrupt file, a session that ended early).
 Each scenario runs in a process of its own. Node 22.6 or newer, or Bun.
 
 ### Recall eval

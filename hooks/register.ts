@@ -22,7 +22,7 @@ import type { EngineInterface, Register, RenderElement } from 'claude-code'
 import type { Io } from './io.ts'
 import { messageTokens, tailStart, tokensOf, turnStarts } from './checkpoint.ts'
 import { KEPT_DOORS, assembleTurn, refs, toBlocks, turnDir, type Row } from './turns.ts'
-import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, startText } from './state.ts'
+import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, startText } from './state.ts'
 import { transcriptOf, transcripts } from './rows.ts'
 import { ensureRepo, projectRoot } from './repo.ts'
 import { adoptOrphans, enqueue, flush, heartbeat } from './spool.ts'
@@ -862,14 +862,19 @@ export const register: Register = (on, options) => {
       if (agentId) finishedAgents.add(agentId)
       // Subagents this turn spawned that have finished: merged into the turn's commit (background ones still running are not)
       const spawned = rows.flatMap(r => r.blocks.flatMap(b => (b.type === 'tool_use' ? [agentsByToolUse.get(b.id)] : []))).filter((a): a is string => !!a && finishedAgents.has(a))
+      // Background subagents that finished after their spawning turn: merged into this one, the turn their result reached
+      const late = agentId ? [] : [...lateAgents].filter(([a, sid]) => sid === S.sid && !spawned.includes(a)).map(([a]) => a)
+      const merging = [...spawned, ...late]
       // A subagent's branch starts where the turn that spawned it continues from (its rows so far say where)
       const baseRows = agentId ? (agentBase.get(agentId) ?? []) : []
       const lineage = agentId
         ? baseRows.length ? { baseRows, transcript: transcriptOf(owner) } : {}
-        : { rows: rows.map(r => r.uuid), transcript: transcriptOf(S.sid), ...(spawned.length ? { merge: spawned.map(a => refs.agent(S.sid, a)) } : {}) }
+        : { rows: rows.map(r => r.uuid), transcript: transcriptOf(S.sid), ...(merging.length ? { merge: merging.map(a => refs.agent(S.sid, a)) } : {}) }
       await enqueue(ioOf($), { ref, base: agentId ? refs.session(owner) : undefined, numberIn: turnDir(agentId), files: out.files, message: out.message, at, ...lineage })
-      // A subagent whose spawning turn has already ended (a background one) is never merged: forget it now
+      for (const a of late) lateAgents.delete(a)
+      // A subagent whose spawning turn has already ended (a background one): the next main turn in its session merges it
       if (agentId && !S.mainRows.some(r => r.blocks.some(b => b.type === 'tool_use' && agentsByToolUse.get(b.id) === agentId))) {
+        lateAgents.set(agentId, owner)
         finishedAgents.delete(agentId)
         agentSession.delete(agentId)
         agentBase.delete(agentId)

@@ -68,6 +68,8 @@ export const finishedAgents = new Set<string>()
 export const agentSession = new Map<string, string>()
 /** The spawning turn's rows at the moment each subagent started: where its branch starts, even if it finishes later. */
 export const agentBase = new Map<string, string[]>()
+/** Subagents that finished after the turn that spawned them had ended (a background one), with their session: the next main turn there merges them. */
+export const lateAgents = new Map<string, string>()
 
 /** The full names the tools were registered under (mcp__<plugin>__<name>). */
 export const toolNames = { recall: 'mcp__convo__recall', turn: 'mcp__convo__turn', branches: 'mcp__convo__branches', merge: 'mcp__convo__merge', pane: 'mcp__convo__pane', context: 'mcp__convo__context' }

@@ -309,6 +309,29 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('asked during the first turn, the context tool still has the earlier days', (early.result ?? '').includes(`${today}:`) && (early.result ?? '').includes('5 turns'), early.result)
   },
 
+  async backgroundAgent(dir, check) {
+    const w = await world(dir)
+    await w.start(A)
+    await w.turn(FIRST, 'Noted.')
+    await w.turn('Count the files, in the background.', 'An agent is counting.', { background: [{ id: 'bg0001', prompt: 'Run ls -la here and count the entries.', answer: 'Four entries.' }] })
+    await w.timers()
+    const two = w.git('rev-parse', `session/${A}`)
+    check('the turn that launched it ends before it does: one parent', w.git('rev-list', '--parents', '-n', '1', two).split(' ').length === 2)
+    await w.finishAgent('bg0001')
+    await w.turn('What did it find?', 'Four entries.')
+    await w.timers()
+    const parents = w.git('rev-list', '--parents', '-n', '1', `session/${A}`).split(' ')
+    check('the next turn merges it: this line first, the subagent second', parents.length === 3 && parents[1] === two && parents[2] === w.git('rev-parse', `agent/${A}/bg0001`), parents.join(' '))
+    check('a Merged-Agents trailer names it', w.git('log', '-1', '--format=%B', `session/${A}`).includes('Merged-Agents: bg0001'))
+    check("its turn is in the session's tree", w.git('ls-tree', '-r', '--name-only', `session/${A}`).includes('agents/bg0001/turns/0001-'))
+    check('its branch starts at the turn that launched it', w.git('rev-parse', `agent/${A}/bg0001^`) === two)
+    const found = await w.tool('recall', { query: 'ls -la count entries' })
+    check('recall on this conversation finds it', (found.result ?? '').includes('Run ls -la here and count the entries.'), found.result ?? found.deny)
+    await w.turn('Thanks.', 'Sure.')
+    await w.timers()
+    check('and merges it once', w.git('rev-list', '--parents', '-n', '1', `session/${A}`).split(' ').length === 2)
+  },
+
   async fork(dir, check) {
     const w = await world(dir)
     await w.start(A)

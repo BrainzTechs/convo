@@ -284,7 +284,10 @@ export class World {
    * the answer. `parent` continues from an earlier row instead of the last
    * (a rewind). `agents` runs subagents inside it.
    */
-  async turn(prompt: string, answer: string, o: { parent?: string | null; tools?: { name: string; input: unknown; output: string }[]; agents?: { id: string; prompt: string; answer: string }[] } = {}): Promise<void> {
+  /** Subagents launched in the background, waiting to run: their tool call's id and their spawning turn's rows so far. */
+  private background = new Map<string, { prompt: string; answer: string }>()
+
+  async turn(prompt: string, answer: string, o: { parent?: string | null; tools?: { name: string; input: unknown; output: string }[]; agents?: { id: string; prompt: string; answer: string }[]; background?: { id: string; prompt: string; answer: string }[] } = {}): Promise<void> {
     const turnId = randomUUID()
     const submitted = await this.fire('prompt.submit', { text: prompt }, e => e)
     this.lastContext = submitted?.context ?? []
@@ -327,10 +330,32 @@ export class World {
       await this.fire('turn.complete', { turnId: at, agentId: a.id, answer: a.answer, reason: 'answer', durationMs: 5 }, () => ({}))
       await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: a.answer }])
     }
+    // Launched in the background: the call returns at once, and the subagent runs after the turn (finishAgent)
+    for (const a of o.background ?? []) {
+      const id = `toolu_${randomUUID().slice(0, 8)}`
+      await append('response', 'assistant', [{ type: 'tool_use', id, name: 'Agent', input: { prompt: a.prompt, run_in_background: true } }])
+      await this.fire('agent.spawn', { tool_use_id: id, subagentType: 'Explore', prompt: a.prompt }, () => ({ agentId: a.id }))
+      await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: `Agent ${a.id} is running in the background.` }])
+      this.background.set(a.id, { prompt: a.prompt, answer: a.answer })
+    }
     await this.request(turnId, index++, fresh)
     await append('response', 'assistant', [{ type: 'text', text: answer }])
     this.messages.push({ role: 'assistant', text: answer, toolUses: [] })
     await this.fire('turn.complete', { turnId, answer, reason: 'answer', durationMs: 10 }, () => ({}))
+  }
+
+  /** A background subagent runs to its end, between the person's turns. */
+  async finishAgent(id: string): Promise<void> {
+    const a = this.background.get(id)
+    if (!a) throw new Error(`no background agent ${id}`)
+    this.background.delete(id)
+    const at = randomUUID()
+    await this.fire('turn.start', { turnId: at, text: a.prompt, agentId: id }, () => ({}))
+    await this.request(at, 0, Math.ceil(a.prompt.length / 3.5), id)
+    for (const [door, type, content] of [['prompt', 'user', [{ type: 'text', text: a.prompt }]], ['response', 'assistant', [{ type: 'text', text: a.answer }]]] as const) {
+      await this.fire('session.append', { door, uuid: randomUUID(), agentId: id, message: { type, content } }, () => ({}))
+    }
+    await this.fire('turn.complete', { turnId: at, agentId: id, answer: a.answer, reason: 'answer', durationMs: 5 }, () => ({}))
   }
 
   /** A fork: a new session whose transcript copies this one's rows, ids kept (--fork-session, /branch). */
