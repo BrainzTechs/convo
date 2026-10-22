@@ -88,6 +88,8 @@ export type ConvoLedger = {
   warmup?: number
   /** Each loop's last request: when, on which model, and its whole input. */
   last: Record<string, { at: number; model: string; input: number }>
+  /** Old tool output convo cleared from the context: how often, how many outputs, and their tokens. */
+  cleared?: { times: number; outputs: number; tokens: number }
 }
 
 declare module 'claude-code' {

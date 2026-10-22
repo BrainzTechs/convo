@@ -8,6 +8,9 @@
 // and merge; a fifth shows convo's pane beside the chat, which this file also
 // draws from the view view.ts builds.
 //
+// Old tool output is cleared from the context, once a lot has piled up, by a
+// compaction that keeps every other message as it was.
+//
 // A finished turn is written to a spool file and committed by a background
 // timer, so turns never wait on git. The exceptions run where the engine is
 // already busy: a compaction's keyframe, a merge Claude asked for, and a
@@ -28,7 +31,8 @@ import { permit } from './permission.ts'
 import { buildCheckpoint, buildOwed } from './keyframes.ts'
 import { branchList, mergeBranch, readTurn, recall, registerTools } from './tools.ts'
 import { buildView, emptyView, paneRows, type PaneRow } from './view.ts'
-import { addAgentRun, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
+import { addAgentRun, addClearing, addStep, addToolOutput, emptyLedger, ledgerRows, readBreakdown } from './ledger.ts'
+import { applyClearing, planClearing, shouldClear } from './clearing.ts'
 import type { ConvoLedger } from '../types/index.d.ts'
 
 /**
@@ -141,6 +145,38 @@ async function countTurn($: EngineInterface, agentId: string | undefined, rows: 
   }
 }
 
+// ── Clearing old tool output ─────────────────────────────────────────
+// Tool output a few turns back is replaced in the context by a stub naming
+// the call and the turn git keeps it in, as a turn ends, once a lot has piled
+// up (clearing.ts says when it pays, and why only then).
+/** The clearing under way: convo's own session.compact hook answers it, and rows it appends are not a turn's. */
+let clearing: { lastTurn?: number } | undefined
+/** The number of the last finished main turn, so each stub can name its turn. */
+let lastFinished: number | undefined
+/** Why clearing is off in this session, when it is: not interactive (a plugin cannot compact in -p or the SDK yet). */
+let clearingOff = ''
+
+/** Clears old tool output now, when enough has piled up. Only from turn.complete: nowhere else does convo's hook get the compaction. */
+async function clearOld($: EngineInterface): Promise<void> {
+  if (clearingOff || clearing || !S.gitOk) return
+  try {
+    const plan = planClearing(await $.session.messages(), { lastTurn: lastFinished })
+    if (!shouldClear(plan)) return
+    clearing = { lastTurn: lastFinished }
+    // The re-cache that follows is convo's doing, not a miss
+    S.compactedAt = Date.now()
+    const r = await $.session.compact({ instructions: 'convo: clearing old tool output' })
+    if (r.skip !== undefined) $.ui.log(`convo: clearing skipped: ${r.skip}`, { to: 'debug' })
+  } catch (err) {
+    const text = String(err)
+    // A session that cannot compact from a plugin never will; anything else may pass (a turn that started meanwhile)
+    if (/headless|not available/i.test(text)) clearingOff = 'a plugin cannot start a compaction in this session'
+    $.ui.log(`convo: old tool output not cleared: ${text.slice(0, 200)}`, { to: 'debug' })
+  } finally {
+    clearing = undefined
+  }
+}
+
 /** How each kind of row reads. */
 function toneOf(tone: PaneRow['tone']): Record<string, unknown> {
   if (tone === 'title') return { bold: true }
@@ -189,6 +225,7 @@ export const register: Register = on => {
     await saveLedger($)
     // Beside the chat on a wide enough screen, unless the person closed it; asking Claude brings it back
     if (e.isInteractive && (await $.store.get('pane-closed')) !== true) void $.ui.open({ id: PANE, title: 'convo' })
+    clearingOff = e.isInteractive ? '' : 'a plugin cannot start a compaction outside an interactive session'
     return next(e)
   })
 
@@ -219,6 +256,8 @@ export const register: Register = on => {
   // ── Rows: buffered per conversation until their turn ends ────────────
   on('session.append', { door: ['prompt', 'response', 'tool-result', 'command', 'delivery', 'compaction'] }, async ($, e, next) => {
     const result = await next(e)
+    // A clearing puts the conversation back with stubs in it: its rows are no turn's, and no summary to record
+    if (clearing && !e.agentId) return result
     try {
       const blocks = toBlocks(e.message.content as { type: string; [k: string]: unknown }[])
       if (e.door === 'compaction') {
@@ -269,6 +308,16 @@ export const register: Register = on => {
 
   // ── Compaction: a keyframe in place of the native summary ─────────────
   on('session.compact', async ($, e, next) => {
+    // convo's own clearing: the same messages, old tool output stubbed; the engine keeps the rest as it was
+    if (clearing && e.trigger === 'plugin' && !e.agentId) {
+      const plan = planClearing(e.messages, { lastTurn: clearing.lastTurn })
+      if (!plan.stubs.size) return { skip: 'convo: no old tool output to clear' }
+      const before = e.messages.reduce((s, m) => s + messageTokens(m), 0)
+      ledger = addClearing(ledger ?? emptyLedger(Date.now()), { outputs: plan.stubs.size, tokens: plan.tokens })
+      await saveLedger($)
+      $.ui.log(`convo: cleared ${plan.stubs.size} old tool outputs (${before} → ${before - plan.tokens} tokens, ${plan.recache} re-cached)`, { to: 'debug' })
+      return { messages: applyClearing(e.messages, plan), tokensBefore: before, tokensAfter: before - plan.tokens }
+    }
     if (!S.gitOk) return next(e)
     // The session compacting now, not the one the last event named (/resume and /clear fire no session.start)
     if (!e.agentId) await useSession(ioOf($), await $.session.id())
@@ -456,6 +505,10 @@ export const register: Register = on => {
       }
     } catch (err) {
       $.ui.log(`convo: turn not recorded: ${String(err).slice(0, 200)}`, { to: 'debug' })
+    }
+    if (!e.agentId) {
+      lastFinished = turnNow
+      await clearOld($)
     }
     return result
   })

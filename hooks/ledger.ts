@@ -82,6 +82,12 @@ export function addStep(l: ConvoLedger, s: Step, o: { compactedAt?: number; turn
 /** A subagent that ran: counted once, when its turn ends. */
 export const addAgentRun = (l: ConvoLedger): ConvoLedger => ({ ...l, agents: { ...l.agents, runs: l.agents.runs + 1 } })
 
+/** A clearing of old tool output: `tokens` is what left the context. */
+export function addClearing(l: ConvoLedger, c: { outputs: number; tokens: number }): ConvoLedger {
+  const was = l.cleared ?? { times: 0, outputs: 0, tokens: 0 }
+  return { ...l, cleared: { times: was.times + 1, outputs: was.outputs + c.outputs, tokens: was.tokens + c.tokens } }
+}
+
 /** Tool output a finished turn added to the context, by tool, in estimated tokens. */
 export function addToolOutput(l: ConvoLedger, byTool: Readonly<Record<string, number>>): ConvoLedger {
   const toolOutput = { ...l.toolOutput }
@@ -129,8 +135,12 @@ export function ledgerRows(l: ConvoLedger | undefined, width: number): PaneRow[]
   const rate = input ? Math.round((100 * l.read) / input) : 0
   const misses = l.misses.length
   const warm = l.warmup && l.warmup >= MISS_TOKENS ? ` · ${k(l.warmup)} cached by the first request` : ''
-  add(`  cache: ${rate}% read from cache${misses ? ` · ${misses} miss${misses === 1 ? '' : 'es'}, ${k(l.missTokens ?? 0)} re-cached` : ' · no misses'}${l.expected ? ` · ${l.expected} after compaction` : ''}${warm}`, misses ? 'warn' : 'good')
+  add(`  cache: ${rate}% read from cache${misses ? ` · ${misses} miss${misses === 1 ? '' : 'es'}, ${k(l.missTokens ?? 0)} re-cached` : ' · no misses'}${l.expected ? ` · ${l.expected} after compacting or clearing` : ''}${warm}`, misses ? 'warn' : 'good')
   for (const m of l.misses.slice(-3)) add(`    ${m.loop === 'main' ? (m.turn !== undefined ? `turn ${m.turn}` : 'a request') : 'a subagent'}: ${k(m.tokens)} re-cached, ${m.why}`, 'warn')
+  if (l.cleared) {
+    const c = l.cleared
+    add(`  cleared ${k(c.tokens)} of old tool output from the context (${c.outputs} output${c.outputs === 1 ? '' : 's'}, ${c.times} time${c.times === 1 ? '' : 's'}); git keeps it`, 'good')
+  }
   if (l.agents.runs || l.agents.tokens) add(`  subagents: ${l.agents.runs} run${l.agents.runs === 1 ? '' : 's'}, ${k(l.agents.tokens)} tokens${l.agents.models.length ? ` (${l.agents.models.join(', ')})` : ''}`, 'dim')
   return rows
 }

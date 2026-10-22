@@ -18,7 +18,7 @@ const CAP = 4 * 1024 * 1024
 
 type Hook = { event: string; matcher?: Record<string, string | string[]>; fn: (...a: any[]) => any; fallback?: (...a: any[]) => any }
 type Block = { type: string; [k: string]: unknown }
-export type Message = { role: 'user' | 'assistant'; text: string; toolUses: unknown[]; handle?: string }
+export type Message = { role: 'user' | 'assistant'; text: string; toolUses: any[]; toolResults?: { tool_use_id: string; text: string; isError: boolean }[]; handle?: string }
 
 export type WorldOptions = {
   home: string
@@ -43,7 +43,9 @@ export class World {
   /** Panes convo asked to open. */
   opened: string[] = []
   every: (() => unknown)[] = []
-  after: (() => unknown)[] = []
+  after: { ms: number; f: () => unknown; cancelled: boolean }[] = []
+  /** Compactions convo started itself ($.session.compact), with what came back. */
+  pluginCompactions: any[] = []
   logs: string[] = []
   asked: string[] = []
   modelCalls: { system: string; prompt: string }[] = []
@@ -164,11 +166,16 @@ export class World {
     env: { get: async (k: string) => (k === 'HOME' ? this.o.home : k === 'CLAUDE_CONFIG_DIR' ? this.configDir : undefined) },
     clock: {
       every: (_ms: number, f: () => unknown) => void this.every.push(f),
-      after: (_ms: number, f: () => unknown) => void this.after.push(f),
+      after: (ms: number, f: () => unknown) => {
+        const t = { ms, f, cancelled: false }
+        this.after.push(t)
+        return { cancel: () => void (t.cancelled = true) }
+      },
     },
     session: {
       id: async () => this.sid,
       messages: async () => this.messages,
+      compact: (o: { instructions?: string }) => this.pluginCompact(o.instructions),
       usage: async () => ({
         startedAt: 0,
         context: { tokens: this.cached.get('main') ?? 0, window: 1_000_000, breakdown: { categories: [
@@ -273,7 +280,9 @@ export class World {
       await this.request(turnId, index++, fresh)
       fresh = Math.ceil(t.output.length / 3.5) + 20
       await append('response', 'assistant', [{ type: 'tool_use', id, name: t.name, input: t.input }])
+      this.messages.push({ role: 'assistant', text: '', toolUses: [{ tool_use_id: id, tool: t.name, input: t.input }] })
       await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: t.output }])
+      this.messages.push({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: id, text: t.output, isError: false }] })
     }
     for (const a of o.agents ?? []) {
       const id = `toolu_${randomUUID().slice(0, 8)}`
@@ -320,10 +329,37 @@ export class World {
     const text = r.messages?.[0]?.text ?? ''
     const uuid = this.row('user', [{ type: 'text', text }], null)
     await this.fire('session.append', { door: 'compaction', uuid, message: { type: 'user', content: [{ type: 'text', text }] } }, () => ({}))
-    this.messages = (r.messages ?? []).map((m: Message) => ({ role: m.role, text: m.text, toolUses: m.toolUses ?? [] }))
+    this.messages = (r.messages ?? []).map((m: Message) => ({ role: m.role, text: m.text, toolUses: m.toolUses ?? [], ...(m.toolResults ? { toolResults: m.toolResults } : {}) }))
     // The next request sends the smaller conversation, cached afresh
     this.cached.set('main', 0)
     this.nextUsage = { read: 0, write: 8000 }
+    return r
+  }
+
+  /**
+   * A compaction a plugin started: the hooks answer, or native does. As in
+   * Claude Code, the conversation goes back into the transcript as new rows
+   * after a boundary (each reaching hooks through the compaction door), and a
+   * message kept by its handle is the one the engine had. The next request
+   * reads only the setup from the cache and writes the conversation again,
+   * as Claude Code's requests do after a live clearing.
+   */
+  async pluginCompact(instructions?: string): Promise<any> {
+    const old = this.messages.map((m, i) => ({ ...m, handle: `h${i}` }))
+    const native = { messages: [{ role: 'user', text: 'This session is being continued from a previous conversation. Native summary.', toolUses: [] }] }
+    const r = await this.fire('session.compact', { trigger: 'plugin', instructions, messages: old }, () => native)
+    this.pluginCompactions.push(r)
+    if (r.skip !== undefined) return r
+    const back: Message[] = r.messages.map((m: Message) => (m.handle ? { ...old[Number(m.handle.slice(1))]! } : m))
+    let parent: string | null = this.row('user', [{ type: 'text', text: 'Conversation compacted' }], null)
+    for (const m of back) {
+      const content = m.toolResults?.length ? m.toolResults.map(t => ({ type: 'tool_result', tool_use_id: t.tool_use_id, content: t.text })) : m.toolUses.length ? m.toolUses.map(u => ({ type: 'tool_use', id: u.tool_use_id, name: u.tool, input: u.input })) : [{ type: 'text', text: m.text }]
+      parent = this.row(m.role, content, parent)
+      await this.fire('session.append', { door: 'compaction', uuid: parent, message: { type: m.role, content } }, () => ({}))
+    }
+    const size = (ms: readonly Message[]): number => ms.reduce((n, m) => n + Math.ceil((m.text.length + JSON.stringify(m.toolUses).length + (m.toolResults ?? []).reduce((t, x) => t + x.text.length, 0)) / 3.5), 0)
+    this.messages = back.map(({ handle: _h, ...m }) => m)
+    this.nextUsage = { read: 10_000, write: size(back) }
     return r
   }
 
@@ -334,8 +370,9 @@ export class World {
 
   /** Runs convo's timers once: the spool flush, the heartbeat, orphan adoption. */
   async timers(): Promise<void> {
-    const after = this.after.splice(0)
-    for (const f of [...after, ...this.every]) await f()
+    const due = this.after.filter(t => !t.cancelled)
+    this.after = []
+    for (const f of [...due.map(t => t.f), ...this.every]) await f()
   }
 
   async end(): Promise<void> {

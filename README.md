@@ -8,6 +8,10 @@ at the turn it came from, and a rewind branches off the earlier turn while
 keeping the line you left. Ask Claude to bring a branch back and it merges
 it; ask about something from earlier and it looks it up.
 
+It also keeps the context lean: once a lot of old tool output has piled up,
+convo clears it from the context, leaving a one-line stub that says where git
+keeps it word for word.
+
 Everything is automatic: there are no commands to learn.
 
 Needs `git` on macOS or Linux (not Windows yet). Tested on Claude Code
@@ -123,6 +127,29 @@ It falls back rather than fail you:
 
 Each keyframe ends by pointing Claude at the recall tools below.
 
+## Old tool output, cleared
+
+A test run, a log or a long file Claude read three turns ago still rides along
+with every request until the conversation compacts. Once such output adds up
+to a lot (30k tokens or more) and makes up a large share of the conversation,
+convo clears it as the turn ends: each output becomes a stub that names the
+call and the turn it is in, and every other message stays exactly as it was.
+
+```
+[convo cleared this output to save context: Bash go test ./..., 6.8k tokens. It is kept word for word: mcp__convo__turn with n 2 reads it back.]
+```
+
+Claude reads it back with the turn tool when it needs it. The last three
+turns are never touched, nor short outputs or a subagent's answer, and no
+model call is made. The request after a clearing caches the smaller
+conversation again once; every request after that is smaller. In a live run,
+clearing five `seq` outputs took each later request from about 155k tokens to
+85k, which paid for that one re-cache within four requests.
+
+Clearing happens only as a turn ends, in an interactive session (Claude Code
+lets a mod start a compaction there and nowhere else). If you have already
+queued your next message, it waits for the end of the next turn.
+
 ## Merge and recall, by asking
 
 convo gives Claude five tools. You never call them; you just say what you want.
@@ -188,6 +215,7 @@ Tokens · this window · $0.06
   every request carries 25k of setup: skills 9.8k, custom agents 6.5k, system tools 4.2k
   conversation now 59k; tool output added 61 (Bash 61)
   cache: 98% read from cache · no misses
+  cleared 39k of old tool output from the context (5 outputs, 1 time); git keeps it
 ```
 
 It counts every model request as Claude Code reports it (main thread and
@@ -196,8 +224,8 @@ breakdown (counted locally, no tokens spent), and the cost from the status
 line, this window's share only. A request that re-caches what the one before
 it had cached is a cache miss: the pane names its turn, its size and the
 likely cause (a pause long enough for the cache to expire, another model, or
-a change at the start of the request). The re-cache after a compaction, and
-the first request of a window, are expected and counted apart.
+a change at the start of the request). The re-cache after a compaction or a
+clearing, and the first request of a window, are expected and counted apart.
 
 To look at the history yourself, use git directly, for example:
 
@@ -253,8 +281,8 @@ bash convo/live-test.sh                                      # all of it, with r
 stood in for. `tests/e2e` runs the same hooks against real git in a throwaway
 home folder, with a scripted model and transcripts written the way Claude Code
 writes them: turns, a fork, a rewind, a keyframe and the turn after it, a
-native fallback, a merge, recall across branches, permission, a subagent, and
-spool recovery (a repeated flush, a corrupt file, a session that ended early).
+native fallback, clearing old tool output, a merge, recall across branches,
+permission, a subagent, and spool recovery (a repeated flush, a corrupt file, a session that ended early).
 Each scenario runs in a process of its own. Node 22.6 or newer, or Bun.
 
 ### Recall eval
@@ -301,6 +329,7 @@ afterwards.
 | `history.ts`, `tools.ts` | recall, turn, branches, merge and pane |
 | `view.ts` | What the pane beside the chat shows, built from git, and its rows (`types/index.d.ts` declares it) |
 | `ledger.ts` | The token ledger and cache misses the pane shows |
+| `clearing.ts` | Which old tool outputs to clear, their stubs, and when it pays |
 | `permission.ts` | Asking before reading beyond this conversation |
 | `redact.ts` | Masking secrets |
 

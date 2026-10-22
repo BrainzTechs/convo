@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { addAgentRun, addStep, addToolOutput, emptyLedger, k, ledgerRows, readBreakdown, type Step } from '../hooks/ledger.ts'
+import { addAgentRun, addClearing, addStep, addToolOutput, emptyLedger, k, ledgerRows, readBreakdown, type Step } from '../hooks/ledger.ts'
 
 const MIN = 60_000
 const step = (at: number, read: number, write: number, more: Partial<Step> = {}): Step => ({ loop: 'main', model: 'opus', at, uncached: 2, read, write, output: 100, ...more })
@@ -54,6 +54,14 @@ describe('the token ledger', () => {
     ]) }
     expect(l.setup).toEqual({ total: 45_059, parts: [['System tools', 34_297], ['Skills', 7645], ['System prompt', 3117]] })
     expect(l.conversation).toBe(12_000)
+  })
+
+  test('clearings add up, and the pane says so', () => {
+    let l = addStep(emptyLedger(0), step(0, 30_000, 10_000))
+    l = addClearing(l, { outputs: 2, tokens: 13_900 })
+    l = addClearing(l, { outputs: 3, tokens: 40_000 })
+    expect(l.cleared).toEqual({ times: 2, outputs: 5, tokens: 53_900 })
+    expect(ledgerRows(l, 200).at(-1)?.text).toBe('  cleared 54k of old tool output from the context (5 outputs, 2 times); git keeps it')
   })
 
   test('the pane section, and short counts', () => {
