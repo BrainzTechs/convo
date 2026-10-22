@@ -26,7 +26,7 @@ import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents,
 import { transcriptOf, transcripts } from './rows.ts'
 import { ensureRepo, projectRoot } from './repo.ts'
 import { adoptOrphans, enqueue, flush, heartbeat } from './spool.ts'
-import { noticeCompaction, recordCompaction, rowsFor, useSession } from './session.ts'
+import { SUMMARY_OPENING, noticeCompaction, recordCompaction, rowsFor, useSession } from './session.ts'
 import { permit } from './permission.ts'
 import { buildCheckpoint, buildOwed } from './keyframes.ts'
 import { branchList, mergeBranch, readTurn, recall, registerTools } from './tools.ts'
@@ -156,24 +156,70 @@ let lastFinished: number | undefined
 /** Why clearing is off in this session, when it is: not interactive (a plugin cannot compact in -p or the SDK yet). */
 let clearingOff = ''
 
-/** Clears old tool output now, when enough has piled up. Only from turn.complete: nowhere else does convo's hook get the compaction. */
-async function clearOld($: EngineInterface): Promise<void> {
-  if (clearingOff || clearing || !S.gitOk) return
+/** Clears old tool output now, when enough has piled up; says whether it did. Only from turn.complete: nowhere else does convo's hook get the compaction. */
+async function clearOld($: EngineInterface): Promise<boolean> {
+  if (clearingOff || clearing || !S.gitOk) return false
   try {
     const plan = planClearing(await $.session.messages(), { lastTurn: lastFinished })
-    if (!shouldClear(plan)) return
+    if (!shouldClear(plan)) return false
     clearing = { lastTurn: lastFinished }
     // The re-cache that follows is convo's doing, not a miss
     S.compactedAt = Date.now()
     const r = await $.session.compact({ instructions: 'convo: clearing old tool output' })
     if (r.skip !== undefined) $.ui.log(`convo: clearing skipped: ${r.skip}`, { to: 'debug' })
+    return r.skip === undefined
   } catch (err) {
     const text = String(err)
     // A session that cannot compact from a plugin never will; anything else may pass (a turn that started meanwhile)
     if (/headless|not available/i.test(text)) clearingOff = 'a plugin cannot start a compaction in this session'
     $.ui.log(`convo: old tool output not cleared: ${text.slice(0, 200)}`, { to: 'debug' })
+    return false
   } finally {
     clearing = undefined
+  }
+}
+
+// ── Compacting earlier than Claude Code would ────────────────────────
+// The `compactAt` setting: once the context reaches that many tokens, convo
+// compacts with a keyframe as a turn ends, well before Claude Code's own
+// limit (near the whole window). Off (0) by default.
+/** The setting, in tokens; 0 leaves compaction to Claude Code. */
+let compactAt = 0
+/** A compaction convo started for the setting: its own hook builds the keyframe, as for an automatic one. */
+let compacting = false
+/** No early compaction below this: past one, the conversation must grow again first; past a failure, grow well past it. */
+let compactAbove = 0
+/** The first turn after a compaction measures what is left, and sets compactAbove from it. */
+let measureNext = false
+
+/** The least compactAt can be: a keyframe and the setup alone come near smaller ones. */
+export const COMPACT_AT_MIN = 50_000
+
+/** Compacts now when the context has reached the setting, with a keyframe; never natively. */
+async function compactEarly($: EngineInterface): Promise<void> {
+  if (!compactAt || clearingOff || clearing || compacting || !S.gitOk) return
+  const tokens = (await $.session.usage()).context.tokens ?? 0
+  if (measureNext) {
+    // What a compaction left: the next one waits until a quarter of the setting has been added to it
+    measureNext = false
+    compactAbove = tokens + compactAt / 4
+    return
+  }
+  if (tokens < compactAt || tokens < compactAbove) return
+  compacting = true
+  try {
+    const r = await $.session.compact({})
+    if (r.skip !== undefined) {
+      measureNext = false
+      compactAbove = tokens * 1.2
+      $.ui.log(`convo: no early compaction: ${r.skip}`, { to: 'debug' })
+    }
+  } catch (err) {
+    const text = String(err)
+    if (/headless|not available/i.test(text)) clearingOff = 'a plugin cannot start a compaction in this session'
+    $.ui.log(`convo: no early compaction: ${text.slice(0, 200)}`, { to: 'debug' })
+  } finally {
+    compacting = false
   }
 }
 
@@ -186,7 +232,10 @@ function toneOf(tone: PaneRow['tone']): Record<string, unknown> {
   return {}
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const setting = Number((options as Readonly<Record<string, unknown>> | undefined)?.compactAt ?? 0)
+  compactAt = Number.isFinite(setting) && setting > 0 ? Math.max(COMPACT_AT_MIN, setting) : 0
+
   on('session.start', async ($, e, next) => {
     const io = ioOf($)
     const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
@@ -261,9 +310,10 @@ export const register: Register = on => {
     try {
       const blocks = toBlocks(e.message.content as { type: string; [k: string]: unknown }[])
       if (e.door === 'compaction') {
-        // The summary row is the user-role one; the boundary notice carries no text worth keeping
+        // The summary row is the user-role one that opens as Claude Code's summaries do; the boundary notice carries no
+        // text worth keeping, and the turns a compaction kept come back through this door too
         const summary = blocks.flatMap(b => (b.type === 'text' ? [b.text] : [])).join('\n')
-        if (e.message.type === 'user' && summary && !e.agentId) {
+        if (e.message.type === 'user' && summary.includes(SUMMARY_OPENING) && !e.agentId) {
           S.compactedAt = Date.now()
           await recordCompaction(ioOf($), summary)
           // Held back: start the keyframe now, so the next prompt need not wait for it
@@ -323,23 +373,35 @@ export const register: Register = on => {
     if (!e.agentId) await useSession(ioOf($), await $.session.id())
     // A subagent's own compaction stays native; so does one a plugin started, which is not held back either
     if (e.agentId) return next(e)
-    if (e.trigger === 'plugin') {
+    if (e.trigger === 'plugin' && !compacting) {
       S.compactHookRan = true
       return next(e)
     }
+    // Claude Code's automatic compaction must free room; convo's own early one keeps turns as a typed /compact does,
+    // but must free at least 30%, and is never native
+    const auto = e.trigger === 'auto'
     // No background summary is paid for that the keyframe would discard
     if (e.trigger === 'precompute') return { skip: 'convo builds a keyframe when the conversation compacts' }
     S.compactHookRan = true
     S.compactedAt = Date.now()
-    // Each way back to native says why in the debug log (claude --debug), so a fallback is never silent
-    const native = (why: string): ReturnType<typeof next> => {
+    // An early compaction waits for the conversation to grow again after this one
+    measureNext = true
+    // Each way back to native says why in the debug log (claude --debug), so a fallback is never silent; convo's own
+    // early compaction is skipped instead (Claude Code still compacts at its own limit)
+    const native = async (why: string): Promise<Awaited<ReturnType<typeof next>>> => {
+      if (compacting) return { skip: `convo: no keyframe yet (${why}); Claude Code still compacts at its own limit` }
       $.ui.log(`convo: compacting natively: ${why}`, { to: 'debug' })
       return next(e)
     }
     const before = e.messages.reduce((s, m) => s + messageTokens(m), 0)
     // Automatic compaction must free room, so the kept turns stay under 40% of it; a typed /compact only caps them
-    const tailCap = e.trigger === 'auto' ? Math.min(40_000, Math.floor(before * 0.4)) : 40_000
-    const from = tailStart(e.messages, 2, tailCap)
+    const tailCap = auto ? Math.min(40_000, Math.floor(before * 0.4)) : 40_000
+    let from = tailStart(e.messages, 2, tailCap)
+    // An early compaction keeps one turn when two would leave nothing before them, or most of the conversation
+    if (compacting && from !== undefined && (from === 0 || e.messages.slice(from).reduce((s, m) => s + messageTokens(m), 0) > 0.5 * before)) {
+      const one = tailStart(e.messages, 1, tailCap)
+      if (one !== undefined && one > 0) from = one
+    }
     // Even the last turn is too big to keep whole, or cut, or there is nothing before it: native does better
     if (from === undefined) return native(`the last turn is too big to keep whole or its tool calls are cut (${before} tokens in all)`)
     if (from === 0) return native('there is nothing before the turns kept word for word')
@@ -352,7 +414,8 @@ export const register: Register = on => {
       // An automatic compaction must free room; a /compact the person typed gets the keyframe whatever the size
       const accept = (text: string): string | undefined => {
         const size = tokensOf(text) + tailTokens
-        return e.trigger === 'auto' && size >= before ? `the keyframe would not shrink the conversation (${size} ≥ ${before} tokens)` : undefined
+        if (compacting && size > 0.7 * before) return `the keyframe would free less than 30% (${size} of ${before} tokens)`
+        return auto && size >= before ? `the keyframe would not shrink the conversation (${size} ≥ ${before} tokens)` : undefined
       }
       const kf = await buildCheckpoint(ioOf($), { sid: S.sid, guidance: e.instructions, trigger: e.trigger, minTurns, accept })
       if (!kf) return native('this session has no turns in git yet')
@@ -362,8 +425,7 @@ export const register: Register = on => {
       return { messages: [{ role: 'user', text: kf.text, toolUses: [] }, ...tail], tokensBefore: before, tokensAfter: after }
     } catch (err) {
       // Fallback 1: native compaction runs, and its summary is recorded as a native keyframe
-      $.ui.log(`convo: keyframe failed, compacting natively: ${String(err).slice(0, 200)}`, { to: 'debug' })
-      return next(e)
+      return native(`the keyframe failed: ${String(err).slice(0, 200)}`)
     } finally {
       $.ui.status(undefined)
     }
@@ -508,7 +570,8 @@ export const register: Register = on => {
     }
     if (!e.agentId) {
       lastFinished = turnNow
-      await clearOld($)
+      // Clearing first, as it keeps every turn; the context's size after it is known only at the next request
+      if (!(await clearOld($))) await compactEarly($)
     }
     return result
   })

@@ -36,9 +36,9 @@ function model(o: { system: string; prompt: string }): string {
 
 type Check = (name: string, ok: boolean, detail?: string) => void
 
-async function world(dir: string, extra: Partial<ConstructorParameters<typeof World>[0]> = {}): Promise<World> {
+async function world(dir: string, extra: Partial<ConstructorParameters<typeof World>[0]> = {}, options: Record<string, unknown> = {}): Promise<World> {
   const w = new World({ home: join(dir, 'home'), cwd: join(dir, 'project'), model, ...extra })
-  register(w.on as never, {} as never)
+  register(w.on as never, options as never)
   return w
 }
 
@@ -98,6 +98,37 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('nothing more to clear: the next turns leave it alone', w.pluginCompactions.length === 1)
     const text = (await import('../../hooks/ledger.ts')).ledgerRows(l, 200).map(r => r.text).join('\n')
     check('the pane says what was cleared', /cleared \d+k of old tool output from the context \(2 outputs, 1 time\); git keeps it/.test(text), text)
+  },
+
+  async compactAt(dir, check) {
+    const w = await world(dir, {}, { compactAt: 60_000 })
+    await w.start(A, true)
+    // Long prompts: about 20k tokens a turn, none of it tool output to clear
+    const long = (what: string): string => `${what} ${'Here is the spec section. '.repeat(2800)}`
+    await w.turn(FIRST, 'Noted.')
+    await w.turn(long('Read this spec.'), 'Read.')
+    check('below the setting, nothing compacts', w.pluginCompactions.length === 0)
+    await w.turn(long('And this part.'), 'Read.')
+    await w.turn(long('And the last part.'), 'Read.')
+    const first = w.pluginCompactions[0]
+    check('past 60k, a keyframe as the turn ends', w.pluginCompactions.length === 1 && first?.messages?.[0]?.text.startsWith('# Keyframe 1') === true, JSON.stringify(w.pluginCompactions.map(c => c.skip ?? c.messages?.[0]?.text.slice(0, 40))))
+    check('tagged in git like any keyframe', w.tryGit('rev-parse', `kf/${A}/1`) !== undefined)
+    check('the last turn kept word for word after it (two would pass the 40k kept)', w.messages.length === 3 && w.messages.at(-2)?.text.startsWith('And the last part.') === true, JSON.stringify(w.messages.map(m => m.text.slice(0, 20))))
+    await w.turn(long('More spec.'), 'Read.')
+    check('it waits for the conversation to grow again', w.pluginCompactions.length === 1)
+    await w.turn(long('Even more.'), 'Read.')
+    await w.turn(long('The appendix.'), 'Read.')
+    check('then compacts again', w.pluginCompactions.length === 2 && w.pluginCompactions[1]?.messages?.[0]?.text.startsWith('# Keyframe 2') === true, JSON.stringify(w.pluginCompactions.map(c => c.skip ?? c.messages?.[0]?.text.slice(0, 40))))
+    check('never natively', !w.pluginCompactions.some(c => c.messages?.[0]?.text.includes('Native summary')))
+
+    // When no keyframe can be made, convo leaves the conversation as it is: Claude Code still compacts at its own limit
+    const v = await world(join(dir, 'v'), { model: () => 'not json' }, { compactAt: 60_000 })
+    await v.start(B, true)
+    await v.turn(FIRST, 'Noted.')
+    for (const what of ['Read this spec.', 'And this part.', 'And the last part.']) await v.turn(long(what), 'Read.')
+    check('a keyframe that fails is skipped, not replaced by a native summary', v.pluginCompactions.length === 1 && typeof v.pluginCompactions[0]?.skip === 'string' && v.messages.length === 8, JSON.stringify({ c: v.pluginCompactions, n: v.messages.length }))
+    await v.turn('Ok?', 'Ok.')
+    check('and not tried again until the conversation has grown well past it', v.pluginCompactions.length === 1)
   },
 
   async fork(dir, check) {
@@ -176,7 +207,7 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     await w.timers()
     const r = await w.compact('auto')
     check('falls back to the native summary', r.messages?.[0]?.text.includes('Native summary') === true)
-    check('the debug log says why', w.logs.some(l => l.includes('keyframe failed, compacting natively')), w.logs.join(' | '))
+    check('the debug log says why', w.logs.some(l => l.includes('compacting natively: the keyframe failed')), w.logs.join(' | '))
     await w.turn('Go on.', 'Going on.')
     await w.timers()
     const files = w.git('ls-tree', '-r', '--name-only', `session/${A}`, 'keyframes/')

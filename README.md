@@ -124,8 +124,30 @@ It falls back rather than fail you:
 | convo was installed partway into a conversation, so git lacks its early turns | Native, so nothing git never saw is dropped |
 | Your organization manages Claude Code, so installed mods don't get the compaction hook | Native compaction runs, and the first prompt after it carries the keyframe as hidden context, so Claude reads both |
 | A subagent compacts, or another mod asked for the compaction | Native, untouched |
+| convo's own early compaction (Compact at) can't make a keyframe that frees 30% | Skipped: the conversation stays as it is until it grows further or Claude Code's limit is reached |
 
 Each keyframe ends by pointing Claude at the recall tools below.
+
+### Compacting earlier
+
+Claude Code compacts only when the window is nearly full (about 967k tokens
+of a 1M window), so until then every request carries the whole conversation.
+Set **Compact at (tokens)** to have convo compact sooner: in `/config` under
+convo, or in settings:
+
+```json
+{ "pluginConfigs": { "convo": { "options": { "compactAt": 200000 } } } }
+```
+
+Once the context reaches that size (setup included, as the pane's "every
+request carries" line counts it; 50,000 at least), convo compacts with a
+keyframe as the turn ends, keeping the last turn or two word for word. It
+compacts only when that frees at least 30%, never falls back to Claude Code's
+summary, and waits for the conversation to grow by a quarter of the setting
+before compacting again; Claude Code's own limit stays in place behind it. In
+a live run with the setting at 80k, a conversation of 87k went to 47k, and
+Claude answered a question about the first turn from the keyframe. Off (0) by
+default.
 
 ## Old tool output, cleared
 
@@ -281,7 +303,7 @@ bash convo/live-test.sh                                      # all of it, with r
 stood in for. `tests/e2e` runs the same hooks against real git in a throwaway
 home folder, with a scripted model and transcripts written the way Claude Code
 writes them: turns, a fork, a rewind, a keyframe and the turn after it, a
-native fallback, clearing old tool output, a merge, recall across branches,
+native fallback, clearing old tool output, compacting at a set size, a merge, recall across branches,
 permission, a subagent, and spool recovery (a repeated flush, a corrupt file, a session that ended early).
 Each scenario runs in a process of its own. Node 22.6 or newer, or Bun.
 
