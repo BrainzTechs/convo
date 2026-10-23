@@ -31,6 +31,11 @@ describe("the pane's History", () => {
     expect(toolsLine(['Bash', 'Read', 'Bash'])).toBe('Bash×2 Read')
   })
 
+  test('an old subagent reply is named by the subagent merged in', () => {
+    const log = commit('d'.repeat(40), 'turn 3: <agent-message from="af5602dd96e12c41a">', '2026-10-23T10:00:00Z', 'p3 agentTip', 'Turn-Id: t3\nMerged-Agents: af5602\n', ['turns/0003-t3.md'])
+    expect(timelineOf(parseLog(log), new Map(), new Map([['agentTip', 'Run the sleep loop']]))[0]?.title).toBe('(subagent reply) Run the sleep loop')
+  })
+
   test("a turn file's detail: what was asked, the answer, its tools and files", () => {
     const d = detailOf(['---', 'turn: 3', 'files: ["store/ledger.go", "api/x.go"]', '---', '## Prompt', 'Run the tests.', '', '## Answer', 'One fails: TestTransfer.', '', '## Tools', '- Bash `go test ./...` → ok, 4 lines, 22315 chars, full output: blobs/aa/bb.txt', '    ok ...', '- Edit `store/ledger.go` → ok, 1 lines', ''].join('\n'))
     // A prompt a plugin submitted reads without Claude Code's framing
@@ -41,6 +46,8 @@ describe("the pane's History", () => {
     // A background subagent's result, as Claude Code hands it to the conversation
     expect(unwrapPrompt('Another Claude session sent a message:\nRun exactly this with Bash: done.\n\nThis is how Claude Code surfaces messages other sessions send.')).toBe('Run exactly this with Bash: done.')
     expect(unwrapPrompt('Someone said they sent a message:\nhi')).toBe('Someone said they sent a message:\nhi')
+    expect(unwrapPrompt('Another Claude session sent a message:\n<agent-message from="af5602dd96e12c41a">\ndone. The loop printed step 1 through step 8.\n</agent-message>')).toBe('(subagent reply) done. The loop printed step 1 through step 8.')
+    expect(unwrapPrompt('Another Claude session sent a message:\n<agent-message from="a1">Two files mention port.')).toBe('(subagent reply) Two files mention port.')
     expect(d).toEqual({ asked: 'Run the tests.', answer: 'One fails: TestTransfer.', tools: ['Bash `go test ./...`', 'Edit `store/ledger.go`'], files: ['store/ledger.go', 'api/x.go'] })
   })
 

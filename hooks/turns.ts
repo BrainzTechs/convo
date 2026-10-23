@@ -282,5 +282,8 @@ export function numbered(item: SpoolItem, n: number): SpoolItem {
 export function unwrapPrompt(prompt: string): string {
   const m = /^(?:The \S+ plugin|Another Claude session|The @?[\w.-]+ (?:subagent|agent|teammate)) sent (?:you )?a message:[ \t]*\n([\s\S]*)$/.exec(prompt)
   if (!m) return prompt
-  return (m[1] ?? '').replace(/\n+This is how Claude Code surfaces [\s\S]*$/, '').trim()
+  const body = (m[1] ?? '').replace(/\n+This is how Claude Code surfaces [\s\S]*$/, '').trim()
+  // A subagent's reply comes tagged with its id: what it said, marked as a subagent's
+  const reply = /^<agent-message\b[^>]*>([\s\S]*?)(?:<\/agent-message>[\s\S]*)?$/.exec(body)
+  return reply ? `(subagent reply) ${(reply[1] ?? '').trim()}`.trim() : body
 }

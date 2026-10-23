@@ -103,7 +103,8 @@ export function timelineOf(raws: readonly Raw[], files: ReadonlyMap<string, { to
         id,
         n: Number(m[1]),
         at: r.at,
-        title: (m[2] ?? '').trim(),
+        // A subagent's reply committed before its subject was read from the message: named by the subagent merged in
+        title: /^<agent-message\b/.test((m[2] ?? '').trim()) ? `(subagent reply) ${agents[0]?.title ?? ''}`.trim() : (m[2] ?? '').trim(),
         ...(tools ? { tools } : {}),
         ...(tokens ? { tokens } : {}),
         ...(Number.isFinite(usd) ? { usd } : {}),
