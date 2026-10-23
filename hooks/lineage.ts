@@ -82,8 +82,9 @@ export function place(tip: string | undefined, base: string | undefined, from: s
 export const rewoundRef = (sid: string, tip: string): string => `refs/heads/rewound/${sid}/${tip.slice(0, 12)}`
 
 /** Trailer lines that record a placement in the commit message. */
-export function lineageTrailers(p: Placement, fromSession: string | undefined, sid: string): string[] {
-  if (p.kind === 'branch') return [`Branched-From: ${fromSession ?? '?'}@${p.parent.slice(0, 12)}`]
+export function lineageTrailers(p: Placement, fromSession: string | undefined, sid: string, resumed = false): string[] {
+  // A resume branches as a fork does (a new id, a new line), and says it is the same conversation going on
+  if (p.kind === 'branch') return [`Branched-From: ${fromSession ?? '?'}@${p.parent.slice(0, 12)}`, ...(resumed ? ['Resumed: yes'] : [])]
   if (p.kind === 'rewind') return [`Rewound-To: ${p.parent.slice(0, 12)}`, `Kept-As: rewound/${sid}/${p.abandoned.slice(0, 12)}`]
   return []
 }

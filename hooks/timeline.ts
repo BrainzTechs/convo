@@ -111,7 +111,7 @@ export function timelineOf(raws: readonly Raw[], files: ReadonlyMap<string, { to
         ...(trailer(r.body, 'Cleared-Before') ? { clearedBefore: trailer(r.body, 'Cleared-Before') } : {}),
         ...(trailer(r.body, 'Brief-From') ? { brief: trailer(r.body, 'Brief-From') } : {}),
         ...(agents.length ? { agents } : {}),
-        ...(branched ? { mark: `branched from ${branched.replace(/@.*/, '').slice(0, 8)}` } : rewound ? { mark: `rewound to ${rewound.slice(0, 7)}` } : {}),
+        ...(branched ? { mark: `${trailer(r.body, 'Resumed') ? 'continued from' : 'branched from'} ${branched.replace(/@.*/, '').slice(0, 8)}` } : rewound ? { mark: `rewound to ${rewound.slice(0, 7)}` } : {}),
         // The line's own turn file; a subagent's (merged in this turn) only on the subagent's own branch
         ...(ownFile(r.files) ? { path: ownFile(r.files) } : {}),
       })

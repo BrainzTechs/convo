@@ -251,6 +251,8 @@ export type SpoolItem = {
   baseRows?: string[]
   /** The tip the files were built from: the commit fails rather than land on another (keyframes, records). */
   expectTip?: string
+  /** A session resumed under a new id: a first turn that goes on from another line says it continued it, not branched. */
+  resumed?: boolean
 }
 
 /**

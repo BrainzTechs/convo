@@ -70,6 +70,10 @@ export const agentSession = new Map<string, string>()
 export const agentBase = new Map<string, string[]>()
 /** Subagents that finished after the turn that spawned them had ended (a background one), with their session: the next main turn there merges them. */
 export const lateAgents = new Map<string, string>()
+/** Sessions that went on from another conversation as a resume (`claude --resume`, /resume), not a fork: their first turn says "continued". */
+export const resumed = new Set<string>()
+/** A /resume was asked for (or a session ended for one): the next session switch is that resume. */
+export const resume = { pending: false }
 
 /** The full names the tools were registered under (mcp__<plugin>__<name>). */
 export const toolNames = { recall: 'mcp__convo__recall', turn: 'mcp__convo__turn', branches: 'mcp__convo__branches', merge: 'mcp__convo__merge', pane: 'mcp__convo__pane', context: 'mcp__convo__context' }

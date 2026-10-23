@@ -108,7 +108,7 @@ export async function commitItemWith(io: Io, item: SpoolItem, indexFile: string,
     const tree = await git(io, ['write-tree'], { env })
     if (!tree.ok) throw new Error(`write-tree: ${tree.err}`)
     const who = { GIT_AUTHOR_NAME: 'convo', GIT_AUTHOR_EMAIL: 'convo@localhost', GIT_COMMITTER_NAME: 'convo', GIT_COMMITTER_EMAIL: 'convo@localhost', GIT_AUTHOR_DATE: item.at, GIT_COMMITTER_DATE: item.at }
-    const message = withTrailers(ready.message, [...lineageTrailers(placement, from?.sid, itemSid), ...(spoolId ? [`Spool-Id: ${spoolId}`] : [])])
+    const message = withTrailers(ready.message, [...lineageTrailers(placement, from?.sid, itemSid, item.resumed === true), ...(spoolId ? [`Spool-Id: ${spoolId}`] : [])])
     const merged = extra.length ? withTrailers(message, [`Merged-Agents: ${extra.map(x => x.id).join(', ')}`]) : message
     const commit = await git(io, parent ? ['commit-tree', tree.out, '-p', parent, ...extra.flatMap(x => ['-p', x.tip])] : ['commit-tree', tree.out], { env: who, stdin: merged })
     if (!commit.ok) throw new Error(`commit-tree: ${commit.err}`)

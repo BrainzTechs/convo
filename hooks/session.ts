@@ -3,7 +3,7 @@
 import type { Io } from './io.ts'
 import { KEYFRAME_OPENING } from './checkpoint.ts'
 import { assembleCompaction, refs, sha256, type Row } from './turns.ts'
-import { S, agentRows } from './state.ts'
+import { S, agentRows, resume, resumed } from './state.ts'
 import { enqueue, flush } from './spool.ts'
 
 export function rowsFor(agentId: string | undefined): Row[] {
@@ -19,6 +19,9 @@ export function rowsFor(agentId: string | undefined): Row[] {
 export async function useSession(io: Io, id: string): Promise<void> {
   if (id === S.sid) return
   if (S.sid !== '') await flush(io)
+  // A switch from another session after a /resume: this one goes on as that resume
+  if (resume.pending && S.sid !== '') resumed.add(id)
+  resume.pending = false
   S.sid = id
   S.moved += 1
   S.mainRows = []

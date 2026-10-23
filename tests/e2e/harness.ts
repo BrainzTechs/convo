@@ -377,7 +377,7 @@ export class World {
   async resume(sid: string): Promise<void> {
     this.sid = sid
     // /resume fires no session.start: convo learns of the switch from the next prompt (here the command itself)
-    await this.fire('prompt.submit', { text: '/resume', command: 'resume' }, e => e)
+    await this.fire('prompt.submit', { text: '/resume', command: { name: 'resume', args: '' } }, e => e)
   }
 
   /** A compaction: convo answers with a keyframe and the last turns, or hands back to native. */

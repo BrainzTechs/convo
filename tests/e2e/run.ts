@@ -365,11 +365,20 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     await w.turn('Port is 8080.', 'Noted.')
     await w.timers()
     // /resume carries the conversation on under a new id, with no event of its own and the session's state empty
+    await w.fire('prompt.submit', { text: '/resume', command: { name: 'resume', args: '' } }, (e: any) => e)
     await w.fork(B)
     w.state.delete('convo/view')
     await w.timers()
     const v = w.view()
     check('the pane follows the switch on its own, with the turns it continues', v?.sid === B && v?.turns === 2 && v?.continues === A, JSON.stringify({ sid: v?.sid, turns: v?.turns, continues: v?.continues }))
+    await w.turn('Make the port 9090.', 'Done.')
+    await w.timers()
+    const body = w.git('log', '-1', '--format=%B', `session/${B}`)
+    check('its first turn says it continued the conversation', body.includes(`Branched-From: ${A}@`) && body.includes('Resumed: yes'), body)
+    const mark = w.view()?.history?.find((e: any) => e.n === 3)?.mark
+    check('and History reads "continued from"', mark === `continued from ${A.slice(0, 8)}`, mark)
+    const lines = (await import('../../hooks/view.ts')).paneRows(w.view(), 200).map(r => r.text).join('\n')
+    check('and Lines reads the conversation it went on from as continued, not forked', lines.includes(`continued from ${A.slice(0, 8)} after its turn 2`) && !lines.includes('forked from'), lines)
   },
 
   async fork(dir, check) {
@@ -391,7 +400,7 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     const parent = w.git('rev-parse', `session/${B}^`)
     check('the fork branches at the turn it was forked from', parent === at, `${parent} vs ${at}`)
     const body = w.git('log', '-1', '--format=%B', `session/${B}`)
-    check('it says where it branched from', body.includes(`Branched-From: ${A}@${at.slice(0, 12)}`), body)
+    check('it says where it branched from, as a fork', body.includes(`Branched-From: ${A}@${at.slice(0, 12)}`) && !body.includes('Resumed:'), body)
     check('the fork numbers its turn 3', w.git('ls-tree', '--name-only', `session/${B}`, 'turns/').split('\n').length === 3)
     check('the original line is untouched', w.git('rev-parse', `session/${A}`) === at)
   },

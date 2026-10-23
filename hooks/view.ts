@@ -12,6 +12,7 @@ import { git, revOf } from './git.ts'
 import { listBranches, turnCount } from './tools.ts'
 import { buildTimeline } from './timeline.ts'
 import { carriedFrom } from './rows.ts'
+import { resumed } from './state.ts'
 
 /** The most other lines the pane lists, newest first. */
 const LINES_SHOWN = 12
@@ -84,6 +85,10 @@ export async function buildView(io: Io, sid: string): Promise<ConvoView> {
     return { subject, body }
   })
   const line = readLine(entries)
+  // A resume under a new id is this conversation going on: the line it went on from reads as continued, not forked
+  const resumedAt = entries.find(x => /^Resumed: yes$/m.test(x.body))
+  const resumedFrom = resumedAt ? /^Branched-From: ([^@\s]+)@/m.exec(resumedAt.body)?.[1] : carried && resumed.has(sid) ? carried.sid : undefined
+  if (resumedFrom) view.resumedFrom = resumedFrom
   // Open tasks from the newest records on this line; a merge's questions are Decide: tasks
   const stored = await git(io, ['show', `${tip}:records.json`])
   const open = parseRecords(stored.ok ? stored.out : undefined).records.filter(r => r.kind === 'task' && !r.done && !r.supersededBy)
@@ -194,7 +199,7 @@ export function paneRows(view: ConvoView | undefined, width: number, more: reado
   for (const l of view.lines) {
     const name = short(l.name)
     if (l.relation === 'parent') {
-      add(`  forked from ${name} after its turn ${l.splitAfter} · ${l.when}`, 'dim')
+      add(`  ${view.resumedFrom && l.name === `session/${view.resumedFrom}` ? 'continued from' : 'forked from'} ${name} after its turn ${l.splitAfter} · ${l.when}`, 'dim')
       continue
     }
     const merge = view.merges.find(m => m.from === l.name)

@@ -22,7 +22,7 @@ import type { EngineInterface, Register, RenderElement } from 'claude-code'
 import type { Io } from './io.ts'
 import { messageTokens, tailStart, tokensOf, turnStarts } from './checkpoint.ts'
 import { KEPT_DOORS, assembleTurn, refs, toBlocks, turnDir, type Row } from './turns.ts'
-import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, startText } from './state.ts'
+import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, resume, resumed, startText } from './state.ts'
 import { transcriptOf, transcripts } from './rows.ts'
 import { ensureRepo, projectRoot } from './repo.ts'
 import { adoptOrphans, enqueue, flush, heartbeat } from './spool.ts'
@@ -672,6 +672,8 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    // Another session takes this one's place: a resume. Anything else (a /clear) is no resume
+    resume.pending = e.reason === 'resume'
     try {
       await flush(ioOf($))
     } catch {
@@ -826,6 +828,8 @@ export const register: Register = (on, options) => {
     if (!S.gitOk) return next(e)
     let extra: string | undefined
     try {
+      // The switch comes after the picker, with no event of its own: the tick or the next prompt makes it, as a resume
+      if (/^\/?resume$/.test(e.command?.name ?? '')) resume.pending = true
       await useSession(ioOf($), await $.session.id())
       if (e.command) return next(e)
       S.submittedAt = Date.now()
@@ -857,6 +861,7 @@ export const register: Register = (on, options) => {
   // The classic events name each session's transcript file exactly
   on('classic.SessionStart', async ($, e, next) => {
     transcripts.set(e.session_id, e.transcript_path)
+    if (e.source === 'resume') resumed.add(e.session_id)
     return next(e)
   }).catch(($, e, next) => next(e))
   on('classic.UserPromptSubmit', async ($, e, next) => {
@@ -947,7 +952,7 @@ export const register: Register = (on, options) => {
       const baseRows = agentId ? (agentBase.get(agentId) ?? []) : []
       const lineage = agentId
         ? baseRows.length ? { baseRows, transcript: transcriptOf(owner) } : {}
-        : { rows: rows.map(r => r.uuid), transcript: transcriptOf(S.sid), ...(merging.length ? { merge: merging.map(a => refs.agent(S.sid, a)) } : {}) }
+        : { rows: rows.map(r => r.uuid), transcript: transcriptOf(S.sid), ...(merging.length ? { merge: merging.map(a => refs.agent(S.sid, a)) } : {}), ...(resumed.has(S.sid) ? { resumed: true } : {}) }
       // What the pane's History reads without opening the turn: tools, tokens, and for the main thread its cost, what was
       // condensed in it, cleared before it, and the brief it began with
       const loop = agentId ?? 'main'
