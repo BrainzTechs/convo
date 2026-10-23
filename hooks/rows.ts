@@ -55,6 +55,35 @@ export async function loadIndex(io: Io): Promise<void> {
   S.indexLoadedAt = Date.now()
 }
 
+/** Sessions whose transcript holds turns another line committed (a resume or fork under a new id): its newest such row's commit. */
+const carried = new Map<string, IndexEntry>()
+
+/**
+ * The newest committed turn a session's transcript carries from another
+ * line, before the session has committed one of its own: what a resume or a
+ * fork under a new id goes on from. Read once, a little more as it grows.
+ */
+export async function carriedFrom(io: Io, sid: string): Promise<IndexEntry | undefined> {
+  if (S.indexLoadedAt === 0) await loadIndex(io)
+  await readNew(io, transcriptOf(sid), t => {
+    // Walks read the same lines, so they are kept for them too
+    readParents(t, parents)
+    for (const line of t.split('\n')) {
+      if (!line.includes('"uuid"')) continue
+      try {
+        const d = JSON.parse(line) as { uuid?: unknown; isSidechain?: unknown }
+        const hit = typeof d.uuid === 'string' && d.isSidechain !== true ? index.get(d.uuid) : undefined
+        if (hit && hit.sid !== sid) carried.set(sid, hit)
+      } catch {
+        // A line still being written
+      }
+    }
+  })
+  const hit = carried.get(sid)
+  if (!hit || !(await git(io, ['cat-file', '-e', `${hit.commit}^{commit}`])).ok) return undefined
+  return hit
+}
+
 /** The commit a turn continues from: its first new row's nearest recorded ancestor. */
 export async function continuesFrom(io: Io, item: SpoolItem): Promise<IndexEntry | undefined> {
   S.walking += 1

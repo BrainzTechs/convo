@@ -72,7 +72,7 @@ function ioOf($: EngineInterface): Io {
 const PANE = 'convo'
 const VIEW = { plugin: 'convo', key: 'view' } as const
 /** What the published view was built from: the history's move count and, when checked, its refs. */
-let published = { moved: -1, sid: '', refs: '' }
+let published = { moved: -1, sid: '', refs: '', empty: false }
 
 /**
  * Rebuilds the pane's view when the history moved: this process's commits
@@ -91,13 +91,14 @@ async function publish($: EngineInterface, look = false): Promise<void> {
       const r = await io.process.run(['git', `--git-dir=${S.repo}`, 'for-each-ref', '--format=%(objectname)', 'refs/heads/'], { timeoutMs: 10_000 })
       refsNow = r.stdout
     }
-    if (published.moved === S.moved && published.sid === S.sid && published.refs === refsNow) return
+    // A session with nothing of its own yet is looked at again on the slow tick: a resumed transcript may fill in after it
+    if (published.moved === S.moved && published.sid === S.sid && published.refs === refsNow && !(look && published.empty)) return
     const at = { moved: S.moved, sid: S.sid }
     const view = await buildView(io, S.sid)
     lastTurns = view.turns
     turnsSince = 0
     await $.state.set(VIEW, view)
-    published = { ...at, refs: look ? refsNow : published.refs }
+    published = { ...at, refs: look ? refsNow : published.refs, empty: !view.tip }
   } catch (err) {
     $.ui.log(`convo: the pane's view was not rebuilt: ${String(err).slice(0, 200)}`, { to: 'debug' })
   }

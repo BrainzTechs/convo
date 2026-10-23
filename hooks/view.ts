@@ -11,6 +11,7 @@ import { refs } from './turns.ts'
 import { git, revOf } from './git.ts'
 import { listBranches, turnCount } from './tools.ts'
 import { buildTimeline } from './timeline.ts'
+import { carriedFrom } from './rows.ts'
 
 /** The most other lines the pane lists, newest first. */
 const LINES_SHOWN = 12
@@ -70,9 +71,13 @@ export function readLine(entries: readonly Entry[]): Pick<ConvoView, 'turns' | '
 /** Builds the pane's view of session `sid` from git. */
 export async function buildView(io: Io, sid: string): Promise<ConvoView> {
   const view = emptyView(sid)
-  const tip = await revOf(io, refs.session(sid))
+  const own = await revOf(io, refs.session(sid))
+  // Resumed or forked under a new id, before a turn of its own: the line its transcript goes on from
+  const carried = own ? undefined : await carriedFrom(io, sid).catch(() => undefined)
+  const tip = own ?? carried?.commit
   const all = await listBranches(io)
   if (!tip) return { ...view, others: all.filter(b => b.ref.startsWith('refs/heads/session/')).length }
+  if (carried) view.continues = carried.sid
   const log = await git(io, ['log', '--first-parent', '-n', '5000', '--format=%s%x01%b%x00', tip])
   const entries = (log.ok ? log.out.split('\0') : []).map(x => x.trim()).filter(Boolean).map(x => {
     const [subject = '', body = ''] = x.split('\x01')

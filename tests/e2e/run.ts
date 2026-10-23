@@ -367,8 +367,13 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     const at = w.git('rev-parse', `session/${A}`)
     await w.fork(B)
     await w.start(B)
+    // Before a turn of its own, the pane shows the line it goes on from, not an empty one
+    const before = w.view()
+    check('before its first turn, the pane shows the turns it continues', before?.turns === 2 && before?.continues === A && before?.history?.filter((e: any) => e.kind === 'turn').length === 2, JSON.stringify({ turns: before?.turns, continues: before?.continues }))
     await w.turn('In this branch, rename it to ledgerx.', 'Renamed.')
     await w.timers()
+    const after = w.view()
+    check('after it, the pane is its own line', after?.turns === 3 && after?.continues === undefined, JSON.stringify({ turns: after?.turns, continues: after?.continues }))
     const parent = w.git('rev-parse', `session/${B}^`)
     check('the fork branches at the turn it was forked from', parent === at, `${parent} vs ${at}`)
     const body = w.git('log', '-1', '--format=%B', `session/${B}`)

@@ -77,6 +77,8 @@ export type ConvoView = {
   others: number
   /** When it was built. */
   at: string
+  /** A session resumed or forked under a new id, before its first turn of its own: the session whose turns it goes on from (`tip` is that line's). */
+  continues?: string
   /** The line's tip, and its newest commits for the History tab. */
   tip?: string
   history?: ConvoEntry[]

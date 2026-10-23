@@ -135,7 +135,7 @@ export function panelNodes(o: { view: ConvoView | undefined; ledger: ConvoLedger
   if (!view) return [{ t: 'text', text: 'Reading this conversation’s history…', tone: 'dim' }]
   if (view.off) return [{ t: 'text', text: `History is off in this session: ${view.off}.`, tone: 'warn' }]
   const sees = !view.turns ? '' : view.context ? ` · from ${view.context.kind === 'keyframe' ? `keyframe ${view.context.n}` : 'a summary'} + ${view.context.turnsSince}` : ' · all in view'
-  const who = o.agent ? `subagent ${o.agent.slice(0, 10)}` : view.sid.slice(0, 8)
+  const who = o.agent ? `subagent ${o.agent.slice(0, 10)}` : `${view.sid.slice(0, 8)}${view.continues ? ` · continues ${view.continues.slice(0, 8)}` : ''}`
   const out: PanelNode[] = [{ t: 'text', text: fit(`${who} · ${view.turns} turn${view.turns === 1 ? '' : 's'}${o.agent ? '' : sees}${view.questions.length ? ` · ${view.questions.length} open question${view.questions.length === 1 ? '' : 's'}` : ''}`, width), tone: 'title' }]
   out.push({ t: 'row', items: TABS.map(([tab, label], i) => ({ t: 'button', key: `tab-${tab}`, hotkey: String(i + 1), text: ui.tab === tab ? `[${label}]` : label, tone: ui.tab === tab ? 'bold' : 'dim', action: { kind: 'tab', tab } })) })
   out.push({ t: 'text', text: '─'.repeat(Math.max(4, Math.min(width, 60))), tone: 'dim' })
