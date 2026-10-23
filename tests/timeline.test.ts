@@ -38,6 +38,9 @@ describe("the pane's History", () => {
     expect(detailOf(framed).asked).toBe('Run the tests.')
     expect(unwrapPrompt('The x plugin sent a message:\nDo it.')).toBe('Do it.')
     expect(unwrapPrompt('Fix these:\n- a')).toBe('Fix these:\n- a')
+    // A background subagent's result, as Claude Code hands it to the conversation
+    expect(unwrapPrompt('Another Claude session sent a message:\nRun exactly this with Bash: done.\n\nThis is how Claude Code surfaces messages other sessions send.')).toBe('Run exactly this with Bash: done.')
+    expect(unwrapPrompt('Someone said they sent a message:\nhi')).toBe('Someone said they sent a message:\nhi')
     expect(d).toEqual({ asked: 'Run the tests.', answer: 'One fails: TestTransfer.', tools: ['Bash `go test ./...`', 'Edit `store/ledger.go`'], files: ['store/ledger.go', 'api/x.go'] })
   })
 

@@ -274,12 +274,13 @@ export function numbered(item: SpoolItem, n: number): SpoolItem {
 }
 
 /**
- * A prompt without the framing Claude Code puts around one a plugin submitted
- * ("The <plugin> plugin sent a message:" … "This is how Claude Code surfaces
- * …"), for the subject and the pane; the turn file keeps it word for word.
+ * A prompt without the framing Claude Code puts around a message it hands
+ * the conversation ("The <plugin> plugin sent a message:", "Another Claude
+ * session sent a message:" … "This is how Claude Code surfaces …"), for the
+ * subject and the pane; the turn file keeps it word for word.
  */
 export function unwrapPrompt(prompt: string): string {
-  const m = /^The \S+ plugin sent a message:\s*\n([\s\S]*)$/.exec(prompt)
+  const m = /^(?:The \S+ plugin|Another Claude session|The @?[\w.-]+ (?:subagent|agent|teammate)) sent (?:you )?a message:[ \t]*\n([\s\S]*)$/.exec(prompt)
   if (!m) return prompt
-  return (m[1] ?? '').replace(/\n+This is how Claude Code surfaces a prompt a plugin submits[\s\S]*$/, '').trim()
+  return (m[1] ?? '').replace(/\n+This is how Claude Code surfaces [\s\S]*$/, '').trim()
 }
