@@ -36,14 +36,41 @@ export function spawned(o: { id: string; type: string; task: string; parent?: st
     tokensOut: 0,
     read: 0,
     usd: 0,
+    weight: 0,
     recent: [],
     repeat: 0,
   }
 }
 
-/** One model request the agent made, with what it cost (the session's cost rose by `usd`). */
-export function stepped(a: ConvoAgent, u: { uncached: number; read: number; write: number; output: number; usd?: number; model?: string }, at: number): ConvoAgent {
-  return { ...a, requests: a.requests + 1, tokensIn: a.tokensIn + u.uncached + u.read + u.write, read: a.read + u.read, tokensOut: a.tokensOut + u.output, usd: a.usd + Math.max(0, u.usd ?? 0), ...(u.model ? { model: u.model } : {}), lastAt: at }
+/** A model's price tier against the others: Opus-class 5, Sonnet 3, Haiku 1 (as list prices stand to each other). */
+export function tierOf(model: string | undefined): number {
+  if (/opus|mythos|fable/i.test(model ?? '')) return 5
+  if (/haiku/i.test(model ?? '')) return 1
+  return 3
+}
+
+/**
+ * A request's price in list-price units: its uncached input 1 a token,
+ * written to the cache 1.25, read from it 0.1, output 5, times its model's
+ * tier. Units, not dollars: the session's own cost turns them into dollars.
+ */
+export function weightOf(u: { uncached: number; read: number; write: number; output: number }, model: string | undefined): number {
+  return (u.uncached + 1.25 * u.write + 0.1 * u.read + 5 * u.output) * tierOf(model)
+}
+
+/** One model request the agent made. */
+export function stepped(a: ConvoAgent, u: { uncached: number; read: number; write: number; output: number; model?: string }, at: number): ConvoAgent {
+  const model = u.model ?? a.model
+  return { ...a, requests: a.requests + 1, tokensIn: a.tokensIn + u.uncached + u.read + u.write, read: a.read + u.read, tokensOut: a.tokensOut + u.output, weight: (a.weight ?? 0) + weightOf(u, model), ...(model ? { model } : {}), lastAt: at }
+}
+
+/**
+ * Its cost: its requests' price at the rate the session's have cost, so
+ * what all loops cost together matches the session's own figure however
+ * their requests overlapped.
+ */
+export function priced(a: ConvoAgent, rate: number): ConvoAgent {
+  return { ...a, usd: (a.weight ?? 0) * rate }
 }
 
 /** What a tool call is about, in a few words: the command, the file, the pattern. */

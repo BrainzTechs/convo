@@ -39,7 +39,7 @@ import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
 import type { ConvoAgent, ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
-import { HANDBACK, called, endToast, finished, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed } from './agents.ts'
+import { HANDBACK, called, endToast, finished, priced, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, weightOf } from './agents.ts'
 import { panelNodes, type Action, type PanelButton } from './panel.ts'
 import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
@@ -144,8 +144,8 @@ const runs = new Map<string, ConvoAgent>()
 /** Handback calls under way, whose results are not tool calls of the agent's. */
 const handbacks = new Set<string>()
 let runsDirty = false
-/** The session's cost when last read, so each request's share goes to the loop that made it. */
-let costSeen: number | undefined
+/** What the session's requests have cost since convo started counting, against their price in list-price units (agents.ts weightOf). */
+const pricing = { since: undefined as number | undefined, weight: 0, rate: 0 }
 /** convo's own status line ("writing a keyframe…"), which goes before the agents' summary. */
 let statusBase: string | undefined
 let statusShown: string | undefined
@@ -167,10 +167,23 @@ function showStatus($: EngineInterface, base?: string | null): void {
   $.ui.status(text)
 }
 
+/** The rate the session's requests have cost, in dollars a list-price unit: an agent's cost is its requests at it. */
+async function refreshRate($: EngineInterface): Promise<void> {
+  const cost = (await $.session.usage().catch(() => undefined))?.cost?.usd
+  if (cost === undefined) return
+  // A cost lower than where counting began started over (/clear): counting does too
+  if (pricing.since === undefined || cost < pricing.since) {
+    pricing.since = cost
+    pricing.weight = 0
+  }
+  if (pricing.weight > 0) pricing.rate = (cost - pricing.since) / pricing.weight
+}
+
 /** An agent that ended: kept as ended, and a toast when it is worth one. */
 function endRun($: EngineInterface, a: ConvoAgent, how: 'done' | 'failed' | 'killed', answer?: string): void {
   if (!isLive(a)) return
-  const ended = finished(a, how, Date.now(), answer)
+  const done = finished(a, how, Date.now(), answer)
+  const ended = pricing.rate > 0 ? priced(done, pricing.rate) : done
   setRun(ended)
   const toast = endToast(ended, Date.now())
   if (toast) $.ui.toast(toast)
@@ -181,6 +194,9 @@ async function tickAgents($: EngineInterface): Promise<void> {
   try {
     const any = [...runs.values()].some(isLive)
     if (any) {
+      await refreshRate($)
+      // Until a rate is known (just after a reload), an agent keeps the cost it had
+      if (pricing.rate > 0) for (const a of runs.values()) if (isLive(a)) runs.set(a.id, priced(a, pricing.rate))
       const list = await $.agent.list().catch(() => [])
       for (const info of list) {
         const a = runs.get(info.id)
@@ -662,6 +678,9 @@ export const register: Register = (on, options) => {
     S.offWhy = why ?? ''
     // Subagents are followed whether or not history is on; a reload carries on with the list the session kept
     if (!runs.size) for (const a of (await $.state.get(AGENTS).catch(() => undefined))?.value ?? []) runs.set(a.id, a)
+    // Requests are priced from here on: what the session cost before this process (a resume) is not theirs
+    pricing.since = (await $.session.usage().catch(() => undefined))?.cost?.usd
+    pricing.weight = 0
     $.clock.every(2000, () => tickAgents($))
     if (!S.gitOk) {
       showStatus($, `history is off (${why})`)
@@ -982,7 +1001,6 @@ export const register: Register = (on, options) => {
     // Followed in the Agents tab; a teammate (long-lived, waiting for messages) is a team's, not followed here
     if (r.agentId && !e.isTeammate) {
       try {
-        if (![...runs.values()].some(isLive)) costSeen = (await $.session.usage().catch(() => undefined))?.cost?.usd
         setRun(spawned({ id: r.agentId, type: e.subagentType, task: e.description || e.prompt.split('\n')[0]?.slice(0, 60) || '', ...(e.parentAgentId ? { parent: e.parentAgentId } : {}), background: e.background === true, model: r.model, ...(e.parentAgentId ? {} : { turn: turnNow }), at: Date.now() }))
       } catch {
         // Following never gets in the way of the agent
@@ -1008,14 +1026,11 @@ export const register: Register = (on, options) => {
         ledger = addStep(ledger ?? emptyLedger(Date.now()), { loop: e.agentId ?? 'main', model: u.model || e.model, at: Date.now(), uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens }, { compactedAt: S.compactedAt, turn: e.agentId ? undefined : turnNow })
         addRequest((usage.days ??= {}), dayOf(Date.now()), { uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens })
         await saveLedger($)
-        // While agents run, what the session's cost rose by goes to the loop whose request this was
-        if ([...runs.values()].some(isLive)) {
-          const cost = (await $.session.usage().catch(() => undefined))?.cost?.usd
-          const share = cost !== undefined && costSeen !== undefined ? cost - costSeen : undefined
-          if (cost !== undefined) costSeen = cost
-          const a = e.agentId ? runs.get(e.agentId) : undefined
-          if (a) setRun(stepped(a, { uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens, ...(share !== undefined ? { usd: share } : {}), ...(u.model ? { model: u.model } : {}) }, Date.now()))
-        }
+        // Every loop's request is priced, so a subagent's share of what the session costs can be told
+        const step = { uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens }
+        pricing.weight += weightOf(step, u.model || e.model)
+        const a = e.agentId ? runs.get(e.agentId) : undefined
+        if (a) setRun(stepped(a, { ...step, ...(u.model ? { model: u.model } : {}) }, Date.now()))
       }
     } catch {
       // Counting never gets in the way of the conversation
@@ -1048,6 +1063,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     // A followed subagent's run ended, by its answer, an error, or being stopped
     const run = e.agentId ? runs.get(e.agentId) : undefined
+    if (run) await refreshRate($)
     if (run) endRun($, run, e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.reason === 'aborted' ? 'killed' : 'done', e.reason === 'answer' ? e.answer : undefined)
     try {
       const agentId = e.agentId

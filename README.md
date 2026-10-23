@@ -407,9 +407,11 @@ sends the message, or stops it, when you send the prompt), **what it found**
 after. The tab's label counts the running ones (`Agents (2)`), and while any
 run the status line says how many, what they have cost and how many look
 stuck. A background subagent finishing, any subagent failing or being
-stopped, and one that first looks stuck are each a toast. Cost is what the
-session's cost rose by with each of its requests, so overlapping requests
-make it an estimate (`~$`). Teammates (agent teams) are not followed.
+stopped, and one that first looks stuck are each a toast. Cost is an estimate
+(`~$`): each request is priced by its tokens as list prices stand to each
+other (output 5, cache writes 1.25, cache reads 0.1 an input token; Opus 5,
+Sonnet 3, Haiku 1), and that at the rate the session's requests have
+actually cost, so the loops together come to the session's own figure. Teammates (agent teams) are not followed.
 
 To look at the history yourself, use git directly, for example:
 

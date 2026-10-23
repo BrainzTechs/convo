@@ -82,7 +82,8 @@ export type ConvoAgent = {
   tokensIn: number
   tokensOut: number
   read: number
-  /** What the session's cost rose by with its requests: an estimate, as requests may overlap. */
+  /** Its requests' price in list-price units (agents.ts weightOf), and that in dollars at the rate the session's requests have cost. */
+  weight: number
   usd: number
   /** The tool call it is in now. */
   now?: { tool: string; detail: string; since: number }

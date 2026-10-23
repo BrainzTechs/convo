@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { agentFacts, callDetail, called, HANDBACK, dur, endToast, finished, ordered, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, STUCK_MS } from '../hooks/agents.ts'
+import { agentFacts, callDetail, called, HANDBACK, priced, tierOf, weightOf, dur, endToast, finished, ordered, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, STUCK_MS } from '../hooks/agents.ts'
 import { agentNodes, panelNodes } from '../hooks/panel.ts'
 import type { ConvoAgent, ConvoView } from '../types/index.d.ts'
 
@@ -9,16 +9,18 @@ const base = (o: Partial<Parameters<typeof spawned>[0]> = {}): ConvoAgent => spa
 describe('subagents as they run', () => {
   test('requests, tool calls and results add up; the current call is the open one', () => {
     let a = base()
-    a = stepped(a, { uncached: 2, read: 40_000, write: 1000, output: 300, usd: 0.03 }, T0 + 1000)
+    a = priced(stepped(a, { uncached: 2, read: 40_000, write: 1000, output: 300, model: 'claude-opus-5-5' }, T0 + 1000), 0.03 / ((2 + 1250 + 4000 + 1500) * 5))
     a = called(a, 'Grep', { pattern: 'assembleTurn', path: 'hooks/' }, T0 + 2000)
     expect(a.now).toEqual({ tool: 'Grep', detail: '"assembleTurn"', since: T0 + 2000 })
     a = returned(a, false, T0 + 3000)
     a = called(a, 'Read', { file_path: 'hooks/turns.ts' }, T0 + 4000)
     a = returned(a, true, T0 + 5000)
-    expect(a).toMatchObject({ requests: 1, tools: 2, errors: 1, tokensIn: 41_002, read: 40_000, tokensOut: 300, usd: 0.03, recent: ['Grep "assembleTurn"', 'Read hooks/turns.ts'], lastAt: T0 + 5000 })
+    expect(a).toMatchObject({ requests: 1, tools: 2, errors: 1, tokensIn: 41_002, read: 40_000, tokensOut: 300, weight: 33_760, model: 'claude-opus-5-5', recent: ['Grep "assembleTurn"', 'Read hooks/turns.ts'], lastAt: T0 + 5000 })
+    expect(Math.abs(a.usd - 0.03) < 1e-9).toBe(true)
     expect(a.now).toBeUndefined()
-    // A negative share (a cost read out of order) adds nothing
-    expect(stepped(a, { uncached: 0, read: 0, write: 0, output: 0, usd: -1 }, T0).usd).toBe(0.03)
+    // Priced as list prices stand to each other: output 5, cache writes 1.25, reads 0.1; Opus 5, Sonnet 3, Haiku 1
+    expect(weightOf({ uncached: 100, read: 1000, write: 100, output: 10 }, 'claude-haiku-5-5')).toBe(375)
+    expect([tierOf('claude-opus-5-5'), tierOf('claude-sonnet-5-5'), tierOf('claude-haiku-5-5'), tierOf(undefined)]).toEqual([5, 3, 1, 3])
     expect(agentFacts(a, T0 + 130_000)).toBe('2m10s · 1 request · 2 tool calls (1 failed) · 41k in · ~$0.03')
     expect(callDetail('Bash', { command: 'go test ./...   -run X' })).toBe('"go test ./... -run X"')
     expect(callDetail('WebFetch', { url: 'https://x.dev', prompt: 'p' })).toBe('https://x.dev')
@@ -51,7 +53,7 @@ describe('subagents as they run', () => {
 
   test('the engine says how each one stands; its end is a toast when it is worth one', () => {
     expect(['completed', 'failed', 'killed', 'idle', 'pending', 'odd'].map(statusOf)).toEqual(['done', 'failed', 'killed', 'waiting', 'running', undefined])
-    const bg = stepped(base({ background: true }), { uncached: 0, read: 0, write: 0, output: 0, usd: 0.04 }, T0)
+    const bg = { ...stepped(base({ background: true }), { uncached: 0, read: 0, write: 0, output: 0 }, T0), usd: 0.04 }
     expect(endToast(finished(bg, 'done', T0 + 40_000), T0 + 40_000)).toBe('subagent "Find assembleTurn callers" finished (1 request · ~$0.04 · 40s)')
     expect(endToast(finished(base(), 'done', T0), T0)).toBeUndefined()
     expect(endToast(finished(base(), 'failed', T0 + 1000), T0)).toMatch(/failed \(0 requests · <\$0\.01 · 1s\)$/)
@@ -59,7 +61,7 @@ describe('subagents as they run', () => {
   })
 
   test('the status line while any run; the list keeps every live one and the newest finished', () => {
-    const one = stepped(base(), { uncached: 0, read: 0, write: 0, output: 0, usd: 0.09 }, T0)
+    const one = { ...stepped(base(), { uncached: 0, read: 0, write: 0, output: 0 }, T0), usd: 0.09 }
     const two = called(base({ id: 'a2' }), 'Bash', { command: 'x' }, T0)
     expect(statusLine([one, two], T0 + 10 * 60_000)).toBe('2 agents running · ~$0.09 · 2 look stuck')
     expect(statusLine([finished(one, 'done', T0)], T0)).toBeUndefined()
@@ -74,7 +76,7 @@ describe('subagents as they run', () => {
 
   test('the Agents tab: rows, a warning, an open one with its calls and buttons', () => {
     const now = T0 + 130_000
-    let a = stepped(base(), { uncached: 2, read: 60_000, write: 1000, output: 200, usd: 0.09 }, T0)
+    let a = { ...stepped(base(), { uncached: 2, read: 60_000, write: 1000, output: 200 }, T0), usd: 0.09 }
     a = called(a, 'Grep', { pattern: 'assembleTurn' }, now - 12_000)
     const done = { ...finished(base({ id: 'b2', type: 'general-purpose', task: 'Fix the transfer test' }), 'done', T0 + 60_000, 'Fixed: the balance was read before the transfer committed.'), merged: 14 }
     const text = agentNodes([a, done], { tab: 'agents' }, 90, now).map(n => n.text)
