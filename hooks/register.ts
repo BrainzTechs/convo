@@ -671,6 +671,15 @@ export const register: Register = (on, options) => {
       : button(n)))) as RenderElement
   })
 
+  // /resume however it runs (typed, or a plugin's $.command.run): the session switch that follows is a resume; one
+  // the person cancelled leaves none pending
+  on('command.run', { command: 'resume' }, async ($, e, next) => {
+    resume.pending = true
+    const r = await next(e)
+    if (/cancel/i.test(r.text ?? '')) resume.pending = false
+    return r
+  }).catch(($, e, next) => next(e))
+
   on('session.end', async ($, e, next) => {
     // Another session takes this one's place: a resume. Anything else (a /clear) is no resume
     resume.pending = e.reason === 'resume'
