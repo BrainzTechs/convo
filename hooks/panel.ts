@@ -152,7 +152,7 @@ export function agentNodes(agents: readonly ConvoAgent[], ui: ConvoUi, width: nu
       : a.status === 'waiting' ? 'waiting for a message'
       : a.status === 'failed' ? 'failed'
       : a.status === 'killed' ? 'stopped'
-      : a.merged !== undefined ? `merged into turn ${a.merged}` : a.background ? 'finished; lands in your next turn' : 'finished'
+      : a.merged !== undefined ? `merged into turn ${a.merged}` : a.background ? 'finished; merges into the next turn' : 'finished'
     out.push({ t: 'text', text: fit(`${pad}│   ${where}`, width), tone: a.status === 'failed' ? 'warn' : a.status === 'running' ? undefined : 'dim' })
     const stuck = stuckOf(a, now)
     if (stuck) out.push({ t: 'text', text: fit(`${pad}│   ⚠ looks stuck: ${stuck}`, width), tone: 'warn' })

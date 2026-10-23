@@ -375,10 +375,10 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('a foreground one ending is no toast', !w.toasts.some(t => t.includes('assembleTurn')), JSON.stringify(w.toasts))
     const bg = list().find(a => a.id === 'bg0001')
     check('the background one runs on after the turn', bg?.status === 'running' && bg.background === true, JSON.stringify(bg))
-    check('the status line says one runs', w.statuses.at(-1)?.startsWith('convo: 1 agent running') === true, JSON.stringify(w.statuses.slice(-3)))
+    check('the status line says one runs', w.statuses.at(-1)?.startsWith('1 agent running') === true, JSON.stringify(w.statuses.slice(-3)))
     await w.finishAgent('bg0001')
     await w.timers()
-    check('its end is a toast: its work lands in the next turn', w.toasts.some(t => t.startsWith('convo: subagent "Run the whole test suite" finished') && t.endsWith('its work lands in your next turn')), JSON.stringify(w.toasts))
+    check('its end is a toast', w.toasts.some(t => t.startsWith('subagent "Run the whole test suite" finished (')), JSON.stringify(w.toasts))
     check('and the status line clears', w.statuses.at(-1) === undefined, JSON.stringify(w.statuses.slice(-3)))
     await w.turn('Thanks.', 'Sure.')
     await w.timers()
@@ -387,7 +387,7 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     await w.turn('One more.', 'Started.', { background: [{ id: 'bg0002', prompt: 'Lint everything', answer: '' }] })
     w.agentStatus.set('bg0002', 'failed')
     await w.timers()
-    check('one the engine lists as failed is a toast and a failed row', list().find(a => a.id === 'bg0002')?.status === 'failed' && w.toasts.some(t => t.startsWith('convo: subagent "Lint everything" failed')), JSON.stringify(w.toasts))
+    check('one the engine lists as failed is a toast and a failed row', list().find(a => a.id === 'bg0002')?.status === 'failed' && w.toasts.some(t => t.startsWith('subagent "Lint everything" failed')), JSON.stringify(w.toasts))
   },
 
   async resumeNewId(dir, check) {

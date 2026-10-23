@@ -155,11 +155,11 @@ function setRun(a: ConvoAgent): void {
   runsDirty = true
 }
 
-/** The status line: convo's own message when it has one, else the running agents' summary. */
+/** The status line (Claude Code names convo before it): convo's own message when it has one, else the running agents' summary. */
 function showStatus($: EngineInterface, base?: string | null): void {
   if (base !== undefined) statusBase = base ?? undefined
   const agents = statusLine([...runs.values()], Date.now())
-  const text = statusBase ?? (agents ? `convo: ${agents}` : undefined)
+  const text = statusBase ?? agents
   if (text === statusShown) return
   statusShown = text
   $.ui.status(text)
@@ -192,7 +192,7 @@ async function tickAgents($: EngineInterface): Promise<void> {
         const stuck = stuckOf(a, now)
         if (stuck && !a.warned) {
           setRun({ ...a, warned: true })
-          $.ui.toast(`convo: subagent "${a.task}" looks stuck: ${stuck}`)
+          $.ui.toast(`subagent "${a.task}" looks stuck: ${stuck}`)
         }
       }
     }
@@ -662,7 +662,7 @@ export const register: Register = (on, options) => {
     if (!runs.size) for (const a of (await $.state.get(AGENTS).catch(() => undefined))?.value ?? []) runs.set(a.id, a)
     $.clock.every(2000, () => tickAgents($))
     if (!S.gitOk) {
-      showStatus($, `convo: history is off (${why})`)
+      showStatus($, `history is off (${why})`)
     } else {
       $.clock.every(2000, () => flush(io))
       await heartbeat(io)
@@ -900,7 +900,7 @@ export const register: Register = (on, options) => {
     // Turns the keyframe stands in for; one may be an earlier summary or keyframe, which git already covers
     const minTurns = Math.max(0, turnStarts(e.messages.slice(0, from)).length - 1)
     try {
-      showStatus($, 'convo: writing a keyframe…')
+      showStatus($, 'writing a keyframe…')
       // An automatic compaction must free room; a /compact the person typed gets the keyframe whatever the size
       const accept = (text: string): string | undefined => {
         const size = tokensOf(text) + tailTokens
@@ -935,7 +935,7 @@ export const register: Register = (on, options) => {
       await noticeCompaction(ioOf($))
       // Noticed only now (no compaction row reached the mod): build it here, with a short bound
       if (S.keyframeOwed && !S.owedRun && !S.owed && S.owedTries < 2) {
-        showStatus($, 'convo: writing a keyframe…')
+        showStatus($, 'writing a keyframe…')
         await buildOwed(ioOf($), 30_000)
       }
       if (S.owed?.sid === S.sid) {

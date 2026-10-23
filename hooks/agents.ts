@@ -151,11 +151,11 @@ export function agentFacts(a: ConvoAgent, now: number): string {
   ].filter(Boolean).join(' · ')
 }
 
-/** The toast an agent's end is worth: a background one finishing, any one failing. */
+/** The toast an agent's end is worth (Claude Code names convo before it): a background one finishing, any one failing. */
 export function endToast(a: ConvoAgent, now: number): string | undefined {
   const facts = `${a.requests} request${a.requests === 1 ? '' : 's'} · ${money(a.usd)} · ${dur((a.ended ?? now) - a.started)}`
-  if (a.status === 'failed') return `convo: subagent "${a.task}" failed (${facts})`
-  if (a.status === 'killed') return `convo: subagent "${a.task}" was stopped (${facts})`
-  if (a.status === 'done' && a.background) return `convo: subagent "${a.task}" finished (${facts}); its work lands in your next turn`
+  if (a.status === 'failed') return `subagent "${a.task}" failed (${facts})`
+  if (a.status === 'killed') return `subagent "${a.task}" was stopped (${facts})`
+  if (a.status === 'done' && a.background) return `subagent "${a.task}" finished (${facts})`
   return undefined
 }

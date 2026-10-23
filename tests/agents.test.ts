@@ -39,7 +39,7 @@ describe('subagents as they run', () => {
   test('the engine says how each one stands; its end is a toast when it is worth one', () => {
     expect(['completed', 'failed', 'killed', 'idle', 'pending', 'odd'].map(statusOf)).toEqual(['done', 'failed', 'killed', 'waiting', 'running', undefined])
     const bg = stepped(base({ background: true }), { uncached: 0, read: 0, write: 0, output: 0, usd: 0.04 }, T0)
-    expect(endToast(finished(bg, 'done', T0 + 40_000), T0 + 40_000)).toBe('convo: subagent "Find assembleTurn callers" finished (1 request · ~$0.04 · 40s); its work lands in your next turn')
+    expect(endToast(finished(bg, 'done', T0 + 40_000), T0 + 40_000)).toBe('subagent "Find assembleTurn callers" finished (1 request · ~$0.04 · 40s)')
     expect(endToast(finished(base(), 'done', T0), T0)).toBeUndefined()
     expect(endToast(finished(base(), 'failed', T0 + 1000), T0)).toMatch(/failed \(0 requests · <\$0\.01 · 1s\)$/)
     expect([dur(40_000), dur(130_000), dur(3_900_000)]).toEqual(['40s', '2m10s', '1h05m'])
