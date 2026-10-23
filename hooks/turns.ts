@@ -199,7 +199,7 @@ export async function assembleTurn(t: TurnInput): Promise<TurnOut> {
   const isNotification = prompt.startsWith('<task-notification>')
   const subjectSource = isNotification
     ? `(subagent finished) ${/<summary>([^<]*)<\/summary>/.exec(prompt)?.[1] ?? ''}`
-    : (prompt || commands.join(' ') || '(no prompt)').split('\n')[0] ?? ''
+    : (unwrapPrompt(prompt) || commands.join(' ') || '(no prompt)').split('\n')[0] ?? ''
   const subject = `turn ${N}: ${cut(subjectSource.trim(), 60).replace(/… \[\d+ chars\]$/, '…')}`
   const trailers = [
     `Turn-Id: ${t.turnId}`,
@@ -269,4 +269,15 @@ export function numbered(item: SpoolItem, n: number): SpoolItem {
     files: item.files.map(f => ({ ...f, path: path(f.path), text: f.path.includes(NNNN) ? text(f.text) : f.text })),
     message: [subject.replace(N, String(n)), ...rest].join('\n'),
   }
+}
+
+/**
+ * A prompt without the framing Claude Code puts around one a plugin submitted
+ * ("The <plugin> plugin sent a message:" … "This is how Claude Code surfaces
+ * …"), for the subject and the pane; the turn file keeps it word for word.
+ */
+export function unwrapPrompt(prompt: string): string {
+  const m = /^The \S+ plugin sent a message:\s*\n([\s\S]*)$/.exec(prompt)
+  if (!m) return prompt
+  return (m[1] ?? '').replace(/\n+This is how Claude Code surfaces a prompt a plugin submits[\s\S]*$/, '').trim()
 }

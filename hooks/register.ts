@@ -39,7 +39,7 @@ import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
 import type { ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
-import { panelNodes, type Action } from './panel.ts'
+import { panelNodes, type Action, type PanelButton } from './panel.ts'
 import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
 import { withTrailers } from './lineage.ts'
@@ -171,8 +171,12 @@ function toolOutputOf(rows: readonly Row[]): Record<string, number> {
 /** Built-in tools listed in front, each with its description's length; kept in the store, as tool.describe fires once a process. */
 let toolSizes: Record<string, number> = {}
 let toolSizesDirty = false
-/** Built-in tools convo held back behind ToolSearch in this process, each with its description's length. */
+/**
+ * Built-in tools convo held back behind ToolSearch in this process, each with its description's length. Kept in the
+ * session's state too: Claude Code describes its tools once a process, so after a reload no tool.describe says it again.
+ */
 const heldTools: Record<string, number> = {}
+const HELD = { plugin: 'convo', key: 'held' } as const
 /** What the hold-back is judged on, read as the session starts; until then nothing is held back. */
 let holdOn: { used: ReadonlySet<string>; days: number } | undefined
 /** Whether ToolSearch is there to find a held-back tool: seen listed, here or in an earlier process. */
@@ -182,6 +186,8 @@ let toolSearchSeen = false
  * tools held back, Claude Code's breakdown leaves the system tools out, and convo estimates them at this rate.
  */
 let toolRate: number | undefined
+/** Tokens a character of tool description takes, until a /context breakdown has measured it: about four characters a token. */
+const TOOL_RATE_GUESS = 0.25
 
 /** The settings (/config, under convo), as the module was loaded with them. */
 const settings = { compactAt: 0, clearOldOutput: true, holdBackTools: true, keepTools: new Set<string>(), condenseOutput: true, neverCondense: new Set<string>(), brief: true }
@@ -329,6 +335,7 @@ async function countTurn($: EngineInterface, agentId: string | undefined, rows: 
         if (toolSizesDirty) {
           toolSizesDirty = false
           await $.store.set('tool-sizes', toolSizes)
+          await $.state.set(HELD, { ...heldTools })
         }
         if (!window || now - window.at > 10 * 60_000) {
           // Judged on this project's use: what git holds from before convo kept records is read first, once
@@ -349,9 +356,9 @@ async function countTurn($: EngineInterface, agentId: string | undefined, rows: 
             toolRate = r
             await $.store.set('tool-rate', r)
           }
-        } else if (toolRate && frontChars) {
-          // Left out of the breakdown: estimated at the rate an earlier session measured, and said so
-          toolTokens = Math.round(toolRate * frontChars)
+        } else if (frontChars) {
+          // Left out of the breakdown: estimated at the rate an earlier session measured (or about four characters a token, before any did), and said so
+          toolTokens = Math.round((toolRate ?? TOOL_RATE_GUESS) * frontChars)
           if (l.setup) l.setup = { total: l.setup.total + toolTokens, parts: [...l.setup.parts, ['System tools (estimated)', toolTokens] as [string, number]].sort((a, b) => b[1] - a[1]) }
         }
         l.trim = setupSavings({
@@ -554,6 +561,8 @@ export const register: Register = (on, options) => {
     if (toolSizes.ToolSearch !== undefined) toolSearchSeen = true
     const rate = await $.store.get('tool-rate')
     if (typeof rate === 'number' && rate > 0) toolRate = rate
+    // A reload: what this process held back before it
+    if (!Object.keys(heldTools).length) Object.assign(heldTools, (await $.state.get(HELD).catch(() => undefined))?.value ?? {})
     const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
     S.cwd = e.cwd
     S.root = home ? await projectRoot(io, home, e.cwd) : ''
@@ -649,9 +658,11 @@ export const register: Register = (on, options) => {
     }
     const nodes = panelNodes({ view, ledger: tokens, ui, width, now: Date.now(), focused: e.props.isFocused, ...(agent ? { agent } : {}) })
     // Drawn with h() rather than JSX, so this module stays a .ts file Node can run in the tests
+    const button = (n: PanelButton): RenderElement => h(Button, { key: n.key, plain: true, ...(n.hotkey ? { hotkey: n.hotkey } : {}), ...(n.tone === 'dim' ? { dimColor: true } : {}), onPress: () => void act($, n.action) }, n.tone === 'bold' ? h(Text, { bold: true }, n.text) : n.text) as RenderElement
     return h(Box, { flexDirection: 'column' }, ...nodes.map(n => (n.t === 'text'
       ? h(Text, toneOf(n.tone), n.text || ' ')
-      : h(Button, { key: n.key, plain: true, ...(n.hotkey ? { hotkey: n.hotkey } : {}), ...(n.tone === 'dim' ? { dimColor: true } : {}), onPress: () => void act($, n.action) }, n.tone === 'bold' ? h(Text, { bold: true }, n.text) : n.text)))) as RenderElement
+      : n.t === 'row' ? h(Box, { flexDirection: 'row', columnGap: 3 }, ...n.items.map(button))
+      : button(n)))) as RenderElement
   })
 
   on('session.end', async ($, e, next) => {

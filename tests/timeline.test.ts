@@ -2,6 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { detailOf, fromTurnFiles, parseLog, timelineOf, toolsLine } from '../hooks/timeline.ts'
 import { ago, contextNodes, gauge, historyNodes, panelNodes, turnFacts } from '../hooks/panel.ts'
 import { emptyLedger } from '../hooks/ledger.ts'
+import { unwrapPrompt } from '../hooks/turns.ts'
 import type { ConvoEntry, ConvoView } from '../types/index.d.ts'
 
 const S = '\x01'
@@ -32,6 +33,11 @@ describe("the pane's History", () => {
 
   test("a turn file's detail: what was asked, the answer, its tools and files", () => {
     const d = detailOf(['---', 'turn: 3', 'files: ["store/ledger.go", "api/x.go"]', '---', '## Prompt', 'Run the tests.', '', '## Answer', 'One fails: TestTransfer.', '', '## Tools', '- Bash `go test ./...` → ok, 4 lines, 22315 chars, full output: blobs/aa/bb.txt', '    ok ...', '- Edit `store/ledger.go` → ok, 1 lines', ''].join('\n'))
+    // A prompt a plugin submitted reads without Claude Code's framing
+    const framed = ['## Prompt', 'The convodrive plugin sent a message:', 'Run the tests.', '', 'This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the', "user's place. Address the message above.", '', '## Answer', 'ok', ''].join('\n')
+    expect(detailOf(framed).asked).toBe('Run the tests.')
+    expect(unwrapPrompt('The x plugin sent a message:\nDo it.')).toBe('Do it.')
+    expect(unwrapPrompt('Fix these:\n- a')).toBe('Fix these:\n- a')
     expect(d).toEqual({ asked: 'Run the tests.', answer: 'One fails: TestTransfer.', tools: ['Bash `go test ./...`', 'Edit `store/ledger.go`'], files: ['store/ledger.go', 'api/x.go'] })
   })
 
@@ -73,15 +79,19 @@ describe("the pane's History", () => {
     const l = { ...emptyLedger(0), requests: 3, uncached: 6, read: 100_000, write: 4000, output: 300, last: { main: { at: 0, model: 'opus', input: 52_000 } }, compactAt: 200_000, autoCompactAt: 967_000 }
     const text = contextNodes(l, 60).map(n => n.text)
     expect(text[0]).toMatch(/^▕█+░+▏ 52k \/ 200k$/)
-    expect(text[1]).toBe('compacts at 200k (your setting)')
+    // Where it compacts is the ledger's line, said once
+    expect(text.filter(t => /compacts at/.test(t ?? ''))).toEqual(['  compacts at 200k with a keyframe (your setting); Claude'])
     expect(text).toContain('  104k in over 3 requests, 300 out')
   })
 
   test('the whole pane: header, tabs with their keys, the tab, and how to use it', () => {
     const view: ConvoView = { sid: 'aaaaaaaa-1', turns: 2, questions: [], tasks: 0, lines: [], merges: [], agents: { all: 0, merged: 0 }, others: 0, at: '', history: [] }
     const nodes = panelNodes({ view, ledger: undefined, ui: { tab: 'history' }, width: 60, now: 0, focused: true })
-    expect(nodes.slice(0, 4).map(n => [n.text, 'hotkey' in n ? n.hotkey : undefined])).toEqual([['aaaaaaaa · 2 turns · all in view', undefined], ['[History]', '1'], ['Context', '2'], ['Lines', '3']])
-    expect(nodes.at(-1)?.text).toBe('Tab moves · Enter opens · 1 2 3 switch tabs · Esc back to the prompt')
-    expect(panelNodes({ view, ledger: undefined, ui: { tab: 'history' }, width: 60, now: 0, focused: false, agent: 'ae4b01aa22' })[0]?.text).toBe('subagent ae4b01aa22 · 2 turns')
+    expect(nodes[0]?.t === 'text' && nodes[0].text).toBe('aaaaaaaa · 2 turns · all in view')
+    // The tabs side by side, on one row
+    const tabs = nodes[1]
+    expect(tabs?.t === 'row' && tabs.items.map(b => [b.key, b.text, b.hotkey])).toEqual([['tab-history', '[History]', '1'], ['tab-context', 'Context', '2'], ['tab-lines', 'Lines', '3']])
+    expect((nodes.at(-1) as { text: string }).text).toBe('Tab moves · Enter opens · 1 2 3 switch tabs · Esc back to the prompt')
+    expect((panelNodes({ view, ledger: undefined, ui: { tab: 'history' }, width: 60, now: 0, focused: false, agent: 'ae4b01aa22' })[0] as { text: string }).text).toBe('subagent ae4b01aa22 · 2 turns')
   })
 })

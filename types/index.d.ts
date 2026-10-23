@@ -156,6 +156,7 @@ export type ConvoLedger = {
 
 declare module 'claude-code' {
   interface PluginState {
-    convo: { view: ConvoView; ledger: ConvoLedger; ui: ConvoUi }
+    /** held: the built-in tools convo held back behind ToolSearch in this process, by name, with their descriptions' length. */
+    convo: { view: ConvoView; ledger: ConvoLedger; ui: ConvoUi; held: Record<string, number> }
   }
 }

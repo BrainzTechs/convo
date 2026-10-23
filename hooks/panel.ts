@@ -15,9 +15,14 @@ import { k, ledgerRows } from './ledger.ts'
 export type Tab = ConvoUi['tab']
 export type Action = { kind: 'tab'; tab: Tab } | { kind: 'toggle'; id: string; path?: string; tip?: string } | { kind: 'fill'; text: string }
 export type Tone = PaneRow['tone'] | 'bold'
+export type PanelButton = { t: 'button'; key: string; text: string; hotkey?: string; tone?: Tone; action: Action }
 export type PanelNode =
   | { t: 'text'; text: string; tone?: Tone }
-  | { t: 'button'; key: string; text: string; hotkey?: string; tone?: Tone; action: Action }
+  | PanelButton
+  /** Buttons side by side, as the tabs are. */
+  | { t: 'row'; items: PanelButton[] }
+/** A node of one line: a tab's own content is made of these. */
+export type LineNode = Exclude<PanelNode, { t: 'row' }>
 
 const TABS: [Tab, string][] = [['history', 'History'], ['context', 'Context'], ['lines', 'Lines']]
 
@@ -44,8 +49,8 @@ export function turnFacts(e: ConvoEntry): string {
 }
 
 /** The History tab: one or two lines an entry, the open turn expanded with its actions. */
-export function historyNodes(entries: readonly ConvoEntry[], ui: ConvoUi, width: number, now: number, tip?: string): PanelNode[] {
-  const out: PanelNode[] = []
+export function historyNodes(entries: readonly ConvoEntry[], ui: ConvoUi, width: number, now: number, tip?: string): LineNode[] {
+  const out: LineNode[] = []
   if (!entries.length) return [{ t: 'text', text: 'Nothing recorded yet: each turn lands here when it ends.', tone: 'dim' }]
   for (const e of entries) {
     const when = ago(e.at, now).padEnd(4)
@@ -72,10 +77,11 @@ export function historyNodes(entries: readonly ConvoEntry[], ui: ConvoUi, width:
 }
 
 /** An open turn's lines: asked, answer, tools, files, tokens, and the button that asks for it in full. */
-export function detailNodes(e: ConvoEntry, d: ConvoDetail | undefined, width: number): PanelNode[] {
-  const out: PanelNode[] = []
+export function detailNodes(e: ConvoEntry, d: ConvoDetail | undefined, width: number): LineNode[] {
+  const out: LineNode[] = []
   const add = (label: string, text: string): void => {
-    for (const [i, line] of wrapRow(`${label}${text.replace(/\s+/g, ' ')}`, width - 4).entries()) out.push({ t: 'text', text: `${i ? '    ' : '  '}${line}`, tone: i ? 'dim' : undefined })
+    // Room for the indent of the lines that follow, so none is cut
+    for (const [i, line] of wrapRow(`${label}${text.replace(/\s+/g, ' ')}`, width - 6).entries()) out.push({ t: 'text', text: `${i ? '    ' : '  '}${line}`, tone: i ? 'dim' : undefined })
   }
   if (!d) {
     out.push({ t: 'text', text: '  reading the turn…', tone: 'dim' })
@@ -98,19 +104,20 @@ export function gauge(now: number, limit: number, width: number): string {
 }
 
 /** The Context tab: the gauge, then the ledger's lines. */
-export function contextNodes(l: ConvoLedger | undefined, width: number): PanelNode[] {
+export function contextNodes(l: ConvoLedger | undefined, width: number): LineNode[] {
   if (!l?.requests) return [{ t: 'text', text: 'No requests counted yet in this window.', tone: 'dim' }]
-  const out: PanelNode[] = []
+  const out: LineNode[] = []
   const now = l.last.main?.input
   const limit = l.compactAt ?? l.autoCompactAt
-  if (now && limit) out.push({ t: 'text', text: gauge(now, limit, width) }, { t: 'text', text: `compacts at ${k(limit)}${l.compactAt ? ' (your setting)' : " (Claude Code's limit)"}`, tone: 'dim' })
+  // The ledger's own line says where it compacts and how
+  if (now && limit) out.push({ t: 'text', text: gauge(now, limit, width) })
   for (const r of ledgerRows(l, width)) if (r.text) out.push({ t: 'text', text: r.text, tone: r.tone })
   return out
 }
 
 /** The Lines tab: the other lines and questions as before, a fork with a button to merge it. */
-export function linesNodes(view: ConvoView, width: number): PanelNode[] {
-  const out: PanelNode[] = []
+export function linesNodes(view: ConvoView, width: number): LineNode[] {
+  const out: LineNode[] = []
   const rows = paneRows(view, width).filter(r => r.text && !/^Session |^Claude (sees|works)|^Nothing recorded|^Ask Claude/.test(r.text))
   for (const r of rows) out.push({ t: 'text', text: r.text, tone: r.tone })
   for (const l of view.lines.filter(x => x.relation === 'split' || x.relation === 'ahead')) {
@@ -130,10 +137,7 @@ export function panelNodes(o: { view: ConvoView | undefined; ledger: ConvoLedger
   const sees = !view.turns ? '' : view.context ? ` · from ${view.context.kind === 'keyframe' ? `keyframe ${view.context.n}` : 'a summary'} + ${view.context.turnsSince}` : ' · all in view'
   const who = o.agent ? `subagent ${o.agent.slice(0, 10)}` : view.sid.slice(0, 8)
   const out: PanelNode[] = [{ t: 'text', text: fit(`${who} · ${view.turns} turn${view.turns === 1 ? '' : 's'}${o.agent ? '' : sees}${view.questions.length ? ` · ${view.questions.length} open question${view.questions.length === 1 ? '' : 's'}` : ''}`, width), tone: 'title' }]
-  for (const [tab, label] of TABS) {
-    const n = String(TABS.findIndex(([t]) => t === tab) + 1)
-    out.push({ t: 'button', key: `tab-${tab}`, hotkey: n, text: ui.tab === tab ? `[${label}]` : label, tone: ui.tab === tab ? 'bold' : 'dim', action: { kind: 'tab', tab } })
-  }
+  out.push({ t: 'row', items: TABS.map(([tab, label], i) => ({ t: 'button', key: `tab-${tab}`, hotkey: String(i + 1), text: ui.tab === tab ? `[${label}]` : label, tone: ui.tab === tab ? 'bold' : 'dim', action: { kind: 'tab', tab } })) })
   out.push({ t: 'text', text: '─'.repeat(Math.max(4, Math.min(width, 60))), tone: 'dim' })
   if (ui.tab === 'history') out.push(...historyNodes(view.history ?? [], ui, width, o.now, view.tip))
   else if (ui.tab === 'context') out.push(...contextNodes(o.ledger, width))

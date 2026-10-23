@@ -7,6 +7,7 @@
 import type { ConvoEntry, ConvoDetail } from '../types/index.d.ts'
 import type { Io } from './io.ts'
 import { git } from './git.ts'
+import { unwrapPrompt } from './turns.ts'
 
 /** The most commits the History reads; the pane scrolls past what it shows. */
 export const TIMELINE_COMMITS = 60
@@ -154,7 +155,7 @@ export function detailOf(text: string): ConvoDetail {
   }
   const files = /^files: \[(.*)\]$/m.exec(text)?.[1]
   return {
-    asked: section('Prompt') || section('Command') || section('Delivered'),
+    asked: unwrapPrompt(section('Prompt').replace(/^\(none\)$/, '')) || section('Command') || section('Delivered'),
     answer: section('Answer'),
     tools: section('Tools').split('\n').filter(l => l.startsWith('- ')).map(l => l.slice(2).replace(/\s+→ ok, \d+ lines?.*$/, '').replace(/→ (ok|error), .*$/, '').trim()),
     files: files ? (JSON.parse(`[${files}]`) as string[]) : [],
