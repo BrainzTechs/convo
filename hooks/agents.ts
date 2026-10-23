@@ -181,6 +181,19 @@ export function ordered(agents: readonly ConvoAgent[]): { a: ConvoAgent; depth: 
   return out
 }
 
+/**
+ * A model as a person names it: "claude-opus-5-5" is "Opus 5.5",
+ * "claude-haiku-4-5-20251001" "Haiku 4.5", an alias "haiku" "Haiku";
+ * anything else as given.
+ */
+export function modelName(model: string | undefined): string {
+  if (!model) return ''
+  const m = /(opus|sonnet|haiku|mythos|fable)(?:-(\d+))?(?:-(\d{1,2}))?(?![\d])/i.exec(model)
+  if (!m?.[1]) return model
+  const family = m[1][0]!.toUpperCase() + m[1].slice(1).toLowerCase()
+  return m[2] ? `${family} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : family
+}
+
 /** The second line of an agent's row: how long, how much, and how it runs. */
 export function agentFacts(a: ConvoAgent, now: number): string {
   return [

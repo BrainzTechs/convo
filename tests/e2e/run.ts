@@ -370,6 +370,7 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     const list = (): any[] => w.state.get('convo/agents') ?? []
     const fg = list().find(a => a.id === 'ag0001')
     check('the subagent is followed: its type, task, requests, tool calls and the failed one', fg?.type === 'general-purpose' && fg.task === 'Find callers of assembleTurn' && fg.requests === 3 && fg.tools === 2 && fg.errors === 1 && fg.status === 'done', JSON.stringify(fg))
+    check('the model it runs on is kept', fg?.model === 'haiku', JSON.stringify(fg))
     check('its answer is its result', fg?.result === 'Two callers.', JSON.stringify(fg))
     check('it is priced at the rate the session has cost, by its own requests', fg?.usd > 0 && fg.weight > 0, JSON.stringify(fg))
     check('its calls are kept for its open row', JSON.stringify(fg?.recent) === JSON.stringify(['Grep "assembleTurn"', 'Read nope.ts']), JSON.stringify(fg?.recent))

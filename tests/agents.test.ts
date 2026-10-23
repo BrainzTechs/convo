@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { agentFacts, callDetail, called, HANDBACK, priced, tierOf, weightOf, dur, endToast, finished, ordered, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, STUCK_MS } from '../hooks/agents.ts'
+import { agentFacts, callDetail, called, HANDBACK, modelName, priced, tierOf, weightOf, dur, endToast, finished, ordered, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, STUCK_MS } from '../hooks/agents.ts'
 import { agentNodes, panelNodes } from '../hooks/panel.ts'
 import type { ConvoAgent, ConvoView } from '../types/index.d.ts'
 
@@ -40,6 +40,10 @@ describe('subagents as they run', () => {
     expect(finished(base(), 'done', T0, 'x'.repeat(500)).result).toHaveLength(400)
   })
 
+  test('the model as a person names it', () => {
+    expect(['claude-opus-5-5', 'claude-haiku-4-5-20251001', 'claude-sonnet-5-5', 'haiku', 'claude-fable-5-1', 'gpt-x', undefined].map(modelName)).toEqual(['Opus 5.5', 'Haiku 4.5', 'Sonnet 5.5', 'Haiku', 'Fable 5.1', 'gpt-x', ''])
+  })
+
   test('it looks stuck in one call, repeating itself, or with nothing new', () => {
     let a = called(base(), 'Bash', { command: 'sleep 999' }, T0)
     expect(stuckOf(a, T0 + 60_000)).toBeUndefined()
@@ -78,13 +82,13 @@ describe('subagents as they run', () => {
     const now = T0 + 130_000
     let a = { ...stepped(base(), { uncached: 2, read: 60_000, write: 1000, output: 200 }, T0), usd: 0.09 }
     a = called(a, 'Grep', { pattern: 'assembleTurn' }, now - 12_000)
-    const done = { ...finished(base({ id: 'b2', type: 'general-purpose', task: 'Fix the transfer test' }), 'done', T0 + 60_000, 'Fixed: the balance was read before the transfer committed.'), merged: 14 }
+    const done = { ...finished(base({ id: 'b2', type: 'general-purpose', task: 'Fix the transfer test', model: 'claude-haiku-4-5-20251001' }), 'done', T0 + 60_000, 'Fixed: the balance was read before the transfer committed.'), merged: 14 }
     const text = agentNodes([a, done], { tab: 'agents' }, 90, now).map(n => n.text)
     expect(text).toEqual([
       '⟳ Explore · Find assembleTurn callers',
       '│   2m10s · 1 request · 61k in · ~$0.09',
       '│   now: Grep "assembleTurn" (12s)',
-      '✓ general-purpose · Fix the transfer test',
+      '✓ general-purpose (Haiku 4.5) · Fix the transfer test',
       '│   1m00s · 0 requests',
       '│   result: Fixed: the balance was read before the transfer committed.',
       '│   merged into turn 14',

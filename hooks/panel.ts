@@ -11,7 +11,7 @@ import type { ConvoAgent, ConvoDetail, ConvoEntry, ConvoLedger, ConvoUi, ConvoVi
 import type { PaneRow } from './view.ts'
 import { paneRows, wrapRow } from './view.ts'
 import { k, ledgerRows } from './ledger.ts'
-import { agentFacts, dur, ordered, stuckOf } from './agents.ts'
+import { agentFacts, dur, modelName, ordered, stuckOf } from './agents.ts'
 
 export type Tab = ConvoUi['tab']
 export type Action = { kind: 'tab'; tab: Tab } | { kind: 'toggle'; id: string; path?: string; tip?: string } | { kind: 'fill'; text: string }
@@ -145,7 +145,9 @@ export function agentNodes(agents: readonly ConvoAgent[], ui: ConvoUi, width: nu
     const pad = '  '.repeat(depth)
     const open = ui.open === `agent:${a.id}`
     const live = a.status === 'running' || a.status === 'waiting'
-    out.push({ t: 'button', key: `agent-${a.id}`, text: fit(`${pad}${open ? '▾' : GLYPH[a.status]} ${a.type} · ${a.task}`, width), tone: live ? undefined : 'dim', action: { kind: 'toggle', id: `agent:${a.id}` } })
+    // The model it runs on beside its type, before the task, which is cut first
+    const model = modelName(a.model)
+    out.push({ t: 'button', key: `agent-${a.id}`, text: fit(`${pad}${open ? '▾' : GLYPH[a.status]} ${a.type}${model ? ` (${model})` : ''} · ${a.task}`, width), tone: live ? undefined : 'dim', action: { kind: 'toggle', id: `agent:${a.id}` } })
     out.push({ t: 'text', text: fit(`${pad}│   ${agentFacts(a, now)}`, width), tone: 'dim' })
     const where = a.status === 'running'
       ? a.now ? `now: ${a.now.tool}${a.now.detail ? ` ${a.now.detail}` : ''} (${dur(now - a.now.since)})` : 'thinking'

@@ -383,20 +383,20 @@ The Agents tab follows each subagent of the session while it runs, and keeps
 the last dozen after they end:
 
 ```
-⟳ Explore · Find assembleTurn callers
+⟳ Explore (Haiku 4.5) · Find assembleTurn callers
 │   2m10s · 14 requests · 31 tool calls · 61k in · ~$0.09
 │   now: Grep "assembleTurn" (12s)
-⟳ general-purpose · Run the whole test suite
+⟳ general-purpose (Opus 5.5) · Run the whole test suite
 │   6m40s · 3 requests · 2 tool calls · 18k in · ~$0.02 · background
 │   now: Bash "go test ./..." (6m12s)
 │   ⚠ looks stuck: in Bash for 6m12s
-✓ general-purpose · Fix the transfer test
+✓ general-purpose (Opus 5.5) · Fix the transfer test
 │   1m00s · 6 requests · 9 tool calls · 40k in · ~$0.04
 │   result: Fixed: the balance was read before the transfer committed.
 │   merged into turn 14
 ```
 
-Each row says how long it has run, its requests, tool calls (and how many
+Each row names the model it runs on, and says how long it has run, its requests, tool calls (and how many
 failed), tokens and cost, and what it is doing now; a subagent's own
 subagents sit under it. A finished one shows what it handed back as its
 result, in a line, or whole when its row is open. It looks stuck when one call has run five minutes,
