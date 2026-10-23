@@ -195,8 +195,9 @@ async function tickAgents($: EngineInterface): Promise<void> {
     const any = [...runs.values()].some(isLive)
     if (any) {
       await refreshRate($)
-      // Until a rate is known (just after a reload), an agent keeps the cost it had
-      if (pricing.rate > 0) for (const a of runs.values()) if (isLive(a)) runs.set(a.id, priced(a, pricing.rate))
+      // Every agent at the one rate, so their costs compare (the rate settles as the session's requests add up);
+      // until a rate is known (just after a reload), an agent keeps the cost it had
+      if (pricing.rate > 0) for (const a of runs.values()) runs.set(a.id, priced(a, pricing.rate))
       const list = await $.agent.list().catch(() => [])
       for (const info of list) {
         const a = runs.get(info.id)
