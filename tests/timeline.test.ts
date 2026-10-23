@@ -90,8 +90,8 @@ describe("the pane's History", () => {
     expect(nodes[0]?.t === 'text' && nodes[0].text).toBe('aaaaaaaa · 2 turns · all in view')
     // The tabs side by side, on one row
     const tabs = nodes[1]
-    expect(tabs?.t === 'row' && tabs.items.map(b => [b.key, b.text, b.hotkey])).toEqual([['tab-history', '[History]', '1'], ['tab-context', 'Context', '2'], ['tab-lines', 'Lines', '3']])
-    expect((nodes.at(-1) as { text: string }).text).toBe('Tab moves · Enter opens · 1 2 3 switch tabs · Esc back to the prompt')
+    expect(tabs?.t === 'row' && tabs.items.map(b => [b.key, b.text, b.hotkey])).toEqual([['tab-history', '[History]', '1'], ['tab-context', 'Context', '2'], ['tab-lines', 'Lines', '3'], ['tab-agents', 'Agents', '4']])
+    expect((nodes.at(-1) as { text: string }).text).toBe('Tab moves · Enter opens · 1–4 switch tabs · Esc back to the prompt')
     expect((panelNodes({ view, ledger: undefined, ui: { tab: 'history' }, width: 60, now: 0, focused: false, agent: 'ae4b01aa22' })[0] as { text: string }).text).toBe('subagent ae4b01aa22 · 2 turns')
     // Resumed under a new id, before a turn of its own
     expect((panelNodes({ view: { ...view, continues: 'e76194f7-1' }, ledger: undefined, ui: { tab: 'history' }, width: 80, now: 0, focused: false })[0] as { text: string }).text).toBe('aaaaaaaa · continues e76194f7 · 2 turns · all in view')

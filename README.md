@@ -340,13 +340,13 @@ finishes after its conversation was cleared or switched.
 ## Looking at it
 
 convo's pane sits beside the chat and follows the conversation as it goes,
-in three tabs: **1 History**, this conversation's commits newest first;
+in four tabs: **1 History**, this conversation's commits newest first;
 **2 Context**, what every request carries (next section); **3 Lines**, forks,
-rewinds, merges and open questions.
+rewinds, merges and open questions; **4 Agents**, subagents as they run.
 
 ```
 aaaaaaaa · 14 turns · from keyframe 2 + 3
-1: [History]  2: Context  3: Lines
+1: [History]   2: Context   3: Lines   4: Agents (1)
 ────────────────────────────────────────────
 ● 14  now  Fix the transfer test
 │          Edit×2 Bash · 41k in · $0.04
@@ -376,6 +376,38 @@ It opens by itself in an interactive session when the screen is wide enough
 stays closed in later sessions; ask Claude to show convo's pane and it comes
 back. "From keyframe 2 + 3" is the newest compaction on this line: Claude
 sees that keyframe (or Claude Code's own summary) and the 3 turns since.
+
+### Subagents, as they run
+
+The Agents tab follows each subagent of the session while it runs, and keeps
+the last dozen after they end:
+
+```
+⟳ Explore · Find assembleTurn callers
+│   2m10s · 14 requests · 31 tool calls · 61k in · ~$0.09
+│   now: Grep "assembleTurn" (12s)
+⟳ general-purpose · Run the whole test suite
+│   6m40s · 3 requests · 2 tool calls · 18k in · ~$0.02 · background
+│   now: Bash "go test ./..." (6m12s)
+│   ⚠ looks stuck: in Bash for 6m12s
+✓ general-purpose · Fix the transfer test
+│   1m00s · 6 requests · 9 tool calls · 40k in · ~$0.04
+│   merged into turn 14
+```
+
+Each row says how long it has run, its requests, tool calls (and how many
+failed), tokens and cost, and what it is doing now; a subagent's own
+subagents sit under it. It looks stuck when one call has run five minutes,
+nothing new has come for five, or it makes the same call three times in a
+row. Open a row (Enter) for its last tool calls and buttons that put a
+prompt in your box: **message it** and **stop it** while it runs (Claude
+sends the message, or stops it, when you send the prompt), **what it found**
+after. The tab's label counts the running ones (`Agents (2)`), and while any
+run the status line says how many, what they have cost and how many look
+stuck. A background subagent finishing, any subagent failing or being
+stopped, and one that first looks stuck are each a toast. Cost is what the
+session's cost rose by with each of its requests, so overlapping requests
+make it an estimate (`~$`). Teammates (agent teams) are not followed.
 
 To look at the history yourself, use git directly, for example:
 
@@ -480,7 +512,8 @@ afterwards.
 | `session.ts` | Session switches and native compactions noticed |
 | `history.ts`, `tools.ts` | recall, turn, branches, merge and pane |
 | `view.ts` | What the pane beside the chat shows, built from git (`types/index.d.ts` declares it) |
-| `timeline.ts`, `panel.ts` | The pane's History from git, and its three tabs as lines and buttons |
+| `timeline.ts`, `panel.ts` | The pane's History from git, and its four tabs as lines and buttons |
+| `agents.ts` | Subagents as they run: progress, cost, looking stuck, the status line and toasts |
 | `ledger.ts` | The token ledger and cache misses the pane shows |
 | `clearing.ts` | Which old tool outputs to clear, their stubs, and when it pays |
 | `condense.ts` | Condensing tool output as it arrives: failures kept, the rest counted |

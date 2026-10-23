@@ -38,7 +38,8 @@ import { condense } from './condense.ts'
 import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
-import type { ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
+import type { ConvoAgent, ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
+import { called, endToast, finished, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed } from './agents.ts'
 import { panelNodes, type Action, type PanelButton } from './panel.ts'
 import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
@@ -124,12 +125,87 @@ async function act($: EngineInterface, a: Action): Promise<void> {
       await $.state.set(UI, { tab: ui.tab })
     } else {
       await $.state.set(UI, { tab: ui.tab, open: a.id })
+      // An agent's row opens on what the tab already holds
+      if (a.id.startsWith('agent:')) return
       const detail = a.path && a.tip ? await turnDetail(ioOf($), a.tip, a.path) : undefined
       const now: ConvoUi = (await $.state.get(UI)).value ?? { tab: 'history' }
       if (now.open === a.id) await $.state.set(UI, { ...now, detail: detail ?? { asked: '', answer: '(not found in git yet: it is committed a moment after the turn ends)', tools: [], files: [] } })
     }
   } catch (err) {
     $.ui.log(`convo: the pane's ${a.kind} did not go through: ${String(err).slice(0, 200)}`, { to: 'debug' })
+  }
+}
+
+// ── Subagents as they run ────────────────────────────────────────────
+// Each one's progress, kept from its events (agents.ts says what is kept);
+// the session's state holds the list for the pane and across a reload.
+const AGENTS = { plugin: 'convo', key: 'agents' } as const
+const runs = new Map<string, ConvoAgent>()
+let runsDirty = false
+/** The session's cost when last read, so each request's share goes to the loop that made it. */
+let costSeen: number | undefined
+/** convo's own status line ("writing a keyframe…"), which goes before the agents' summary. */
+let statusBase: string | undefined
+let statusShown: string | undefined
+
+const isLive = (a: ConvoAgent): boolean => a.status === 'running' || a.status === 'waiting'
+
+function setRun(a: ConvoAgent): void {
+  runs.set(a.id, a)
+  runsDirty = true
+}
+
+/** The status line: convo's own message when it has one, else the running agents' summary. */
+function showStatus($: EngineInterface, base?: string | null): void {
+  if (base !== undefined) statusBase = base ?? undefined
+  const agents = statusLine([...runs.values()], Date.now())
+  const text = statusBase ?? (agents ? `convo: ${agents}` : undefined)
+  if (text === statusShown) return
+  statusShown = text
+  $.ui.status(text)
+}
+
+/** An agent that ended: kept as ended, and a toast when it is worth one. */
+function endRun($: EngineInterface, a: ConvoAgent, how: 'done' | 'failed' | 'killed'): void {
+  if (!isLive(a)) return
+  const ended = finished(a, how, Date.now())
+  setRun(ended)
+  const toast = endToast(ended, Date.now())
+  if (toast) $.ui.toast(toast)
+}
+
+/** Every 2 s while any agent runs: the engine's word on each one's state, stuck warnings, and the pane's copy. */
+async function tickAgents($: EngineInterface): Promise<void> {
+  try {
+    const any = [...runs.values()].some(isLive)
+    if (any) {
+      const list = await $.agent.list().catch(() => [])
+      for (const info of list) {
+        const a = runs.get(info.id)
+        const word = statusOf(info.status)
+        if (!a || !word || word === a.status) continue
+        if (word === 'done' || word === 'failed' || word === 'killed') endRun($, a, word)
+        else setRun({ ...a, status: word })
+      }
+      const now = Date.now()
+      for (const a of runs.values()) {
+        const stuck = stuckOf(a, now)
+        if (stuck && !a.warned) {
+          setRun({ ...a, warned: true })
+          $.ui.toast(`convo: subagent "${a.task}" looks stuck: ${stuck}`)
+        }
+      }
+    }
+    // While any runs, its elapsed time and current call change by the second: the pane is written each tick
+    if (runsDirty || any) {
+      runsDirty = false
+      const kept = trimmed([...runs.values()])
+      for (const id of [...runs.keys()]) if (!kept.some(a => a.id === id)) runs.delete(id)
+      await $.state.set(AGENTS, kept)
+    }
+    showStatus($)
+  } catch (err) {
+    $.ui.log(`convo: subagents not followed: ${String(err).slice(0, 200)}`, { to: 'debug' })
   }
 }
 
@@ -582,8 +658,11 @@ export const register: Register = (on, options) => {
         : await ensureRepo(io)
     S.gitOk = why === undefined
     S.offWhy = why ?? ''
+    // Subagents are followed whether or not history is on; a reload carries on with the list the session kept
+    if (!runs.size) for (const a of (await $.state.get(AGENTS).catch(() => undefined))?.value ?? []) runs.set(a.id, a)
+    $.clock.every(2000, () => tickAgents($))
     if (!S.gitOk) {
-      $.ui.status(`convo: history is off (${why})`)
+      showStatus($, `convo: history is off (${why})`)
     } else {
       $.clock.every(2000, () => flush(io))
       await heartbeat(io)
@@ -662,7 +741,8 @@ export const register: Register = (on, options) => {
       const history = await agentHistory(ioOf($), agent)
       view = { ...view, ...history, questions: [], lines: [], merges: [], context: undefined }
     }
-    const nodes = panelNodes({ view, ledger: tokens, ui, width, now: Date.now(), focused: e.props.isFocused, ...(agent ? { agent } : {}) })
+    const agents = (await $.state.get(AGENTS)).value ?? []
+    const nodes = panelNodes({ view, ledger: tokens, ui, width, now: Date.now(), focused: e.props.isFocused, agents, ...(agent ? { agent } : {}) })
     // Drawn with h() rather than JSX, so this module stays a .ts file Node can run in the tests
     const button = (n: PanelButton): RenderElement => h(Button, { key: n.key, plain: true, ...(n.hotkey ? { hotkey: n.hotkey } : {}), ...(n.tone === 'dim' ? { dimColor: true } : {}), onPress: () => void act($, n.action) }, n.tone === 'bold' ? h(Text, { bold: true }, n.text) : n.text) as RenderElement
     return h(Box, { flexDirection: 'column' }, ...nodes.map(n => (n.t === 'text'
@@ -693,6 +773,16 @@ export const register: Register = (on, options) => {
 
   // ── Rows: buffered per conversation until their turn ends ────────────
   on('session.append', { door: ['prompt', 'response', 'tool-result', 'command', 'delivery', 'compaction'] }, async ($, e, next) => {
+    // A followed subagent's tool calls and their results: what it is doing now
+    const run = e.agentId ? runs.get(e.agentId) : undefined
+    if (run && (e.door === 'response' || e.door === 'tool-result')) {
+      let a = run
+      for (const b of (Array.isArray(e.message.content) ? e.message.content : []) as { type?: string; name?: string; input?: unknown; is_error?: boolean }[]) {
+        if (b.type === 'tool_use' && b.name) a = called(a, b.name, b.input, Date.now())
+        else if (b.type === 'tool_result') a = returned(a, b.is_error === true, Date.now())
+      }
+      if (a !== run) setRun(a)
+    }
     // A long tool result reaches Claude condensed; what is recorded below, for git, is the original
     let sent = e
     if (settings.condenseOutput && S.gitOk && e.door === 'tool-result' && !clearing) {
@@ -810,7 +900,7 @@ export const register: Register = (on, options) => {
     // Turns the keyframe stands in for; one may be an earlier summary or keyframe, which git already covers
     const minTurns = Math.max(0, turnStarts(e.messages.slice(0, from)).length - 1)
     try {
-      $.ui.status('convo: writing a keyframe…')
+      showStatus($, 'convo: writing a keyframe…')
       // An automatic compaction must free room; a /compact the person typed gets the keyframe whatever the size
       const accept = (text: string): string | undefined => {
         const size = tokensOf(text) + tailTokens
@@ -827,7 +917,7 @@ export const register: Register = (on, options) => {
       // Fallback 1: native compaction runs, and its summary is recorded as a native keyframe
       return native(`the keyframe failed: ${String(err).slice(0, 200)}`)
     } finally {
-      $.ui.status(undefined)
+      showStatus($, null)
     }
   }).catch(($, e, next) => next(e))
 
@@ -845,7 +935,7 @@ export const register: Register = (on, options) => {
       await noticeCompaction(ioOf($))
       // Noticed only now (no compaction row reached the mod): build it here, with a short bound
       if (S.keyframeOwed && !S.owedRun && !S.owed && S.owedTries < 2) {
-        $.ui.status('convo: writing a keyframe…')
+        showStatus($, 'convo: writing a keyframe…')
         await buildOwed(ioOf($), 30_000)
       }
       if (S.owed?.sid === S.sid) {
@@ -855,7 +945,7 @@ export const register: Register = (on, options) => {
     } catch (err) {
       $.ui.log(`convo: no keyframe for this prompt: ${String(err).slice(0, 200)}`, { to: 'debug' })
     } finally {
-      $.ui.status(undefined)
+      showStatus($, null)
     }
     let brief: string | undefined
     try {
@@ -881,6 +971,15 @@ export const register: Register = (on, options) => {
 
   on('agent.spawn', async ($, e, next) => {
     const r = await next(e)
+    // Followed in the Agents tab; a teammate (long-lived, waiting for messages) is a team's, not followed here
+    if (r.agentId && !e.isTeammate) {
+      try {
+        if (![...runs.values()].some(isLive)) costSeen = (await $.session.usage().catch(() => undefined))?.cost?.usd
+        setRun(spawned({ id: r.agentId, type: e.subagentType, task: e.description || e.prompt.split('\n')[0]?.slice(0, 60) || '', ...(e.parentAgentId ? { parent: e.parentAgentId } : {}), background: e.background === true, model: r.model, ...(e.parentAgentId ? {} : { turn: turnNow }), at: Date.now() }))
+      } catch {
+        // Following never gets in the way of the agent
+      }
+    }
     if (r.agentId) {
       agentsByToolUse.set(e.tool_use_id, r.agentId)
       agentSession.set(r.agentId, S.sid)
@@ -901,6 +1000,14 @@ export const register: Register = (on, options) => {
         ledger = addStep(ledger ?? emptyLedger(Date.now()), { loop: e.agentId ?? 'main', model: u.model || e.model, at: Date.now(), uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens }, { compactedAt: S.compactedAt, turn: e.agentId ? undefined : turnNow })
         addRequest((usage.days ??= {}), dayOf(Date.now()), { uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens })
         await saveLedger($)
+        // While agents run, what the session's cost rose by goes to the loop whose request this was
+        if ([...runs.values()].some(isLive)) {
+          const cost = (await $.session.usage().catch(() => undefined))?.cost?.usd
+          const share = cost !== undefined && costSeen !== undefined ? cost - costSeen : undefined
+          if (cost !== undefined) costSeen = cost
+          const a = e.agentId ? runs.get(e.agentId) : undefined
+          if (a) setRun(stepped(a, { uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens, ...(share !== undefined ? { usd: share } : {}), ...(u.model ? { model: u.model } : {}) }, Date.now()))
+        }
       }
     } catch {
       // Counting never gets in the way of the conversation
@@ -911,6 +1018,12 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     // The number this main turn will get: one past what this line holds
     if (!e.agentId) turnNow = lastTurns + turnsSince + 1
+    // A finished subagent a message brought back: running again
+    const back = e.agentId ? runs.get(e.agentId) : undefined
+    if (back && !isLive(back)) {
+      const { ended: _e, warned: _w, merged: _m, ...rest } = back
+      setRun({ ...rest, status: 'running', lastAt: Date.now() })
+    }
     // A changed session id means /clear, /branch, a fork or a rewind: a new branch
     await useSession(ioOf($), await $.session.id())
     startText.set(e.turnId, e.text)
@@ -925,6 +1038,9 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    // A followed subagent's run ended, by its answer, an error, or being stopped
+    const run = e.agentId ? runs.get(e.agentId) : undefined
+    if (run) endRun($, run, e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.reason === 'aborted' ? 'killed' : 'done')
     try {
       const agentId = e.agentId
       const rows = agentId ? (agentRows.get(agentId) ?? []) : S.mainRows
@@ -957,6 +1073,10 @@ export const register: Register = (on, options) => {
       // Background subagents that finished after their spawning turn: merged into this one, the turn their result reached
       const late = agentId ? [] : [...lateAgents].filter(([a, sid]) => sid === S.sid && !spawned.includes(a)).map(([a]) => a)
       const merging = [...spawned, ...late]
+      for (const a of merging) {
+        const r = runs.get(a)
+        if (r && !agentId) setRun({ ...r, merged: turnNow })
+      }
       // A subagent's branch starts where the turn that spawned it continues from (its rows so far say where)
       const baseRows = agentId ? (agentBase.get(agentId) ?? []) : []
       const lineage = agentId

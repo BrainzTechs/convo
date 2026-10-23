@@ -358,6 +358,38 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('and the view has the tip to read them from', w.view()?.tip === w.git('rev-parse', `session/${A}`))
   },
 
+  async agentsLive(dir, check) {
+    const w = await world(dir)
+    await w.start(A, true)
+    // A subagent that runs two tools in its turn (one fails), and a background one still going when the turn ends
+    await w.turn('Look into the transfer test.', 'Found it.', {
+      agents: [{ id: 'ag0001', prompt: 'Find callers of assembleTurn', answer: 'Two callers.', tools: [{ name: 'Grep', input: { pattern: 'assembleTurn' }, output: 'hooks/register.ts' }, { name: 'Read', input: { file_path: 'nope.ts' }, output: 'no such file', isError: true }] }],
+      background: [{ id: 'bg0001', prompt: 'Run the whole test suite', answer: 'All pass.' }],
+    })
+    await w.timers()
+    const list = (): any[] => w.state.get('convo/agents') ?? []
+    const fg = list().find(a => a.id === 'ag0001')
+    check('the subagent is followed: its type, task, requests, tool calls and the failed one', fg?.type === 'general-purpose' && fg.task === 'Find callers of assembleTurn' && fg.requests === 3 && fg.tools === 2 && fg.errors === 1 && fg.status === 'done', JSON.stringify(fg))
+    check('its calls are kept for its open row', JSON.stringify(fg?.recent) === JSON.stringify(['Grep "assembleTurn"', 'Read nope.ts']), JSON.stringify(fg?.recent))
+    check('it merged into the turn that spawned it', fg?.merged === 1, JSON.stringify(fg))
+    check('a foreground one ending is no toast', !w.toasts.some(t => t.includes('assembleTurn')), JSON.stringify(w.toasts))
+    const bg = list().find(a => a.id === 'bg0001')
+    check('the background one runs on after the turn', bg?.status === 'running' && bg.background === true, JSON.stringify(bg))
+    check('the status line says one runs', w.statuses.at(-1)?.startsWith('convo: 1 agent running') === true, JSON.stringify(w.statuses.slice(-3)))
+    await w.finishAgent('bg0001')
+    await w.timers()
+    check('its end is a toast: its work lands in the next turn', w.toasts.some(t => t.startsWith('convo: subagent "Run the whole test suite" finished') && t.endsWith('its work lands in your next turn')), JSON.stringify(w.toasts))
+    check('and the status line clears', w.statuses.at(-1) === undefined, JSON.stringify(w.statuses.slice(-3)))
+    await w.turn('Thanks.', 'Sure.')
+    await w.timers()
+    check('the next turn merges it', list().find(a => a.id === 'bg0001')?.merged === 2, JSON.stringify(list().find(a => a.id === 'bg0001')))
+    // The engine's list says one failed: a toast, whatever ran it
+    await w.turn('One more.', 'Started.', { background: [{ id: 'bg0002', prompt: 'Lint everything', answer: '' }] })
+    w.agentStatus.set('bg0002', 'failed')
+    await w.timers()
+    check('one the engine lists as failed is a toast and a failed row', list().find(a => a.id === 'bg0002')?.status === 'failed' && w.toasts.some(t => t.startsWith('convo: subagent "Lint everything" failed')), JSON.stringify(w.toasts))
+  },
+
   async resumeNewId(dir, check) {
     const w = await world(dir)
     await w.start(A)

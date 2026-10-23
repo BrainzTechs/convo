@@ -55,6 +55,10 @@ export class World {
   /** Settings convo changed ($.config.set). */
   configSets: { key: string; value: unknown }[] = []
   logs: string[] = []
+  toasts: string[] = []
+  statuses: (string | undefined)[] = []
+  /** What $.agent.list() answers: each agent's engine status, by id. */
+  agentStatus = new Map<string, string>()
   asked: string[] = []
   modelCalls: { system: string; prompt: string }[] = []
   /** The last row of the main thread in each session's transcript. */
@@ -225,13 +229,17 @@ export class World {
         return { isAnswered: true, text: this.o.model(o), usage }
       },
     },
+    agent: {
+      list: async () => [...this.agentStatus].map(([id, status]) => ({ id, description: '', type: 'agent', status })),
+    },
     tool: {
       register: async (spec: { name: string }) => ({ tool: `mcp__convo__${spec.name}` }),
       check: async () => this.o.verdict ?? { decision: 'allow' },
     },
     ui: {
       log: (text: string) => void this.logs.push(text),
-      status: () => undefined,
+      status: (t?: string) => void this.statuses.push(t),
+      toast: (t: string) => void this.toasts.push(t),
       // No surface here: a pane opens undrawn, as in a -p run
       open: async (pane: { id: string }) => {
         this.opened.push(pane.id)
@@ -287,7 +295,7 @@ export class World {
   /** Subagents launched in the background, waiting to run: their tool call's id and their spawning turn's rows so far. */
   private background = new Map<string, { prompt: string; answer: string }>()
 
-  async turn(prompt: string, answer: string, o: { parent?: string | null; tools?: { name: string; input: unknown; output: string }[]; agents?: { id: string; prompt: string; answer: string }[]; background?: { id: string; prompt: string; answer: string }[] } = {}): Promise<void> {
+  async turn(prompt: string, answer: string, o: { parent?: string | null; tools?: { name: string; input: unknown; output: string }[]; agents?: { id: string; prompt: string; answer: string; tools?: { name: string; input: unknown; output: string; isError?: boolean }[] }[]; background?: { id: string; prompt: string; answer: string }[] } = {}): Promise<void> {
     const turnId = randomUUID()
     const submitted = await this.fire('prompt.submit', { text: prompt }, e => e)
     this.lastContext = submitted?.context ?? []
@@ -319,13 +327,19 @@ export class World {
     for (const a of o.agents ?? []) {
       const id = `toolu_${randomUUID().slice(0, 8)}`
       await append('response', 'assistant', [{ type: 'tool_use', id, name: 'Agent', input: { prompt: a.prompt } }])
-      await this.fire('agent.spawn', { tool_use_id: id, subagentType: 'general-purpose', prompt: a.prompt }, () => ({ agentId: a.id }))
+      await this.fire('agent.spawn', { tool_use_id: id, subagentType: 'general-purpose', prompt: a.prompt, description: a.prompt.slice(0, 30), background: false }, () => ({ agentId: a.id, model: 'haiku' }))
       await this.request(turnId, index++, fresh)
       fresh = Math.ceil(a.answer.length / 3.5) + 20
       const at = randomUUID()
       await this.fire('turn.start', { turnId: at, text: a.prompt, agentId: a.id }, () => ({}))
       await this.request(at, 0, Math.ceil(a.prompt.length / 3.5), a.id)
       await append('prompt', 'user', [{ type: 'text', text: a.prompt }], undefined, a.id)
+      for (const t of a.tools ?? []) {
+        const tid = `toolu_${randomUUID().slice(0, 8)}`
+        await append('response', 'assistant', [{ type: 'tool_use', id: tid, name: t.name, input: t.input }], undefined, a.id)
+        await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: tid, content: t.output, ...(t.isError ? { is_error: true } : {}) }], undefined, a.id)
+        await this.request(at, 1, 50, a.id)
+      }
       await append('response', 'assistant', [{ type: 'text', text: a.answer }], undefined, a.id)
       await this.fire('turn.complete', { turnId: at, agentId: a.id, answer: a.answer, reason: 'answer', durationMs: 5 }, () => ({}))
       await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: a.answer }])
@@ -334,7 +348,7 @@ export class World {
     for (const a of o.background ?? []) {
       const id = `toolu_${randomUUID().slice(0, 8)}`
       await append('response', 'assistant', [{ type: 'tool_use', id, name: 'Agent', input: { prompt: a.prompt, run_in_background: true } }])
-      await this.fire('agent.spawn', { tool_use_id: id, subagentType: 'Explore', prompt: a.prompt }, () => ({ agentId: a.id }))
+      await this.fire('agent.spawn', { tool_use_id: id, subagentType: 'Explore', prompt: a.prompt, description: a.prompt.slice(0, 30), background: true }, () => ({ agentId: a.id, model: 'haiku' }))
       await append('tool-result', 'user', [{ type: 'tool_result', tool_use_id: id, content: `Agent ${a.id} is running in the background.` }])
       this.background.set(a.id, { prompt: a.prompt, answer: a.answer })
     }

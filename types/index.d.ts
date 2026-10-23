@@ -55,8 +55,43 @@ export type ConvoEntry = {
 /** An open turn's detail in the pane: what was asked, the answer, its tools, the files it touched. */
 export type ConvoDetail = { asked: string; answer: string; tools: string[]; files: string[] }
 
-/** The pane's own state: the tab, and the turn open in History with its detail. */
-export type ConvoUi = { tab: 'history' | 'context' | 'lines'; open?: string; detail?: ConvoDetail }
+/** The pane's own state: the tab, and the turn (or `agent:<id>`) open in it, with a turn's detail. */
+export type ConvoUi = { tab: 'history' | 'context' | 'lines' | 'agents'; open?: string; detail?: ConvoDetail }
+
+/** A subagent of this session, as the Agents tab shows it: live while it runs, kept a while after. */
+export type ConvoAgent = {
+  id: string
+  /** Its agent type (Explore, general-purpose, a plugin's) and the task it was given, in the Agent call's words. */
+  type: string
+  task: string
+  /** The agent that spawned it; absent when the conversation did. */
+  parent?: string
+  background: boolean
+  model?: string
+  /** The conversation's turn it was spawned in, and the one its work merged into. */
+  turn?: number
+  merged?: number
+  started: number
+  ended?: number
+  /** Its last request, tool call or result: what "nothing new for" counts from. */
+  lastAt: number
+  status: 'running' | 'waiting' | 'done' | 'failed' | 'killed'
+  requests: number
+  tools: number
+  errors: number
+  tokensIn: number
+  tokensOut: number
+  read: number
+  /** What the session's cost rose by with its requests: an estimate, as requests may overlap. */
+  usd: number
+  /** The tool call it is in now. */
+  now?: { tool: string; detail: string; since: number }
+  /** Its last few tool calls, newest last, and how many times in a row the last one repeats. */
+  recent: string[]
+  repeat: number
+  /** It was named in a "looks stuck" toast already. */
+  warned?: boolean
+}
 
 export type ConvoView = {
   /** Why history is off in this session, when it is. */
@@ -161,6 +196,7 @@ export type ConvoLedger = {
 declare module 'claude-code' {
   interface PluginState {
     /** held: the built-in tools convo held back behind ToolSearch in this process, by name, with their descriptions' length. */
-    convo: { view: ConvoView; ledger: ConvoLedger; ui: ConvoUi; held: Record<string, number> }
+    /** agents: this session's subagents, live and recently finished. */
+    convo: { view: ConvoView; ledger: ConvoLedger; ui: ConvoUi; held: Record<string, number>; agents: ConvoAgent[] }
   }
 }

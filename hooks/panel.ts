@@ -3,14 +3,15 @@
 // in the person's prompt box for them to send. Pure: register.ts draws the
 // nodes with the surface's Box, Text and Button and runs the actions.
 //
-// Three tabs: History (this conversation's commits), Context (what every
-// request carries, as a gauge and a few lines) and Lines (forks, rewinds,
-// merges, open questions).
+// Four tabs: History (this conversation's commits), Context (what every
+// request carries, as a gauge and a few lines), Lines (forks, rewinds,
+// merges, open questions) and Agents (subagents as they run).
 
-import type { ConvoDetail, ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
+import type { ConvoAgent, ConvoDetail, ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
 import type { PaneRow } from './view.ts'
 import { paneRows, wrapRow } from './view.ts'
 import { k, ledgerRows } from './ledger.ts'
+import { agentFacts, dur, ordered, stuckOf } from './agents.ts'
 
 export type Tab = ConvoUi['tab']
 export type Action = { kind: 'tab'; tab: Tab } | { kind: 'toggle'; id: string; path?: string; tip?: string } | { kind: 'fill'; text: string }
@@ -24,7 +25,7 @@ export type PanelNode =
 /** A node of one line: a tab's own content is made of these. */
 export type LineNode = Exclude<PanelNode, { t: 'row' }>
 
-const TABS: [Tab, string][] = [['history', 'History'], ['context', 'Context'], ['lines', 'Lines']]
+const TABS: [Tab, string][] = [['history', 'History'], ['context', 'Context'], ['lines', 'Lines'], ['agents', 'Agents']]
 
 /** "now", "4m", "3h", "2d": how long ago, short. */
 export function ago(iso: string, now: number): string {
@@ -129,19 +130,63 @@ export function linesNodes(view: ConvoView, width: number): LineNode[] {
   return out
 }
 
+const GLYPH: Record<ConvoAgent['status'], string> = { running: '⟳', waiting: '◌', done: '✓', failed: '✗', killed: '■' }
+
+/**
+ * The Agents tab: each subagent in two or three lines (what it is, what it
+ * has taken, what it is doing or how it ended, and a warning when it looks
+ * stuck); an open one adds its last tool calls and buttons that put a
+ * request in the prompt box. Its own subagents are indented under it.
+ */
+export function agentNodes(agents: readonly ConvoAgent[], ui: ConvoUi, width: number, now: number): LineNode[] {
+  if (!agents.length) return [{ t: 'text', text: 'No subagents in this session yet: each one shows here as it runs.', tone: 'dim' }]
+  const out: LineNode[] = []
+  for (const { a, depth } of ordered(agents)) {
+    const pad = '  '.repeat(depth)
+    const open = ui.open === `agent:${a.id}`
+    const live = a.status === 'running' || a.status === 'waiting'
+    out.push({ t: 'button', key: `agent-${a.id}`, text: fit(`${pad}${open ? '▾' : GLYPH[a.status]} ${a.type} · ${a.task}`, width), tone: live ? undefined : 'dim', action: { kind: 'toggle', id: `agent:${a.id}` } })
+    out.push({ t: 'text', text: fit(`${pad}│   ${agentFacts(a, now)}`, width), tone: 'dim' })
+    const where = a.status === 'running'
+      ? a.now ? `now: ${a.now.tool}${a.now.detail ? ` ${a.now.detail}` : ''} (${dur(now - a.now.since)})` : 'thinking'
+      : a.status === 'waiting' ? 'waiting for a message'
+      : a.status === 'failed' ? 'failed'
+      : a.status === 'killed' ? 'stopped'
+      : a.merged !== undefined ? `merged into turn ${a.merged}` : a.background ? 'finished; lands in your next turn' : 'finished'
+    out.push({ t: 'text', text: fit(`${pad}│   ${where}`, width), tone: a.status === 'failed' ? 'warn' : a.status === 'running' ? undefined : 'dim' })
+    const stuck = stuckOf(a, now)
+    if (stuck) out.push({ t: 'text', text: fit(`${pad}│   ⚠ looks stuck: ${stuck}`, width), tone: 'warn' })
+    if (!open) continue
+    for (const line of a.recent) out.push({ t: 'text', text: fit(`${pad}    · ${line}`, width), tone: 'dim' })
+    if (!a.recent.length) out.push({ t: 'text', text: `${pad}    no tool calls yet`, tone: 'dim' })
+    const named = `subagent ${a.id} ("${a.task}")`
+    if (live) {
+      out.push({ t: 'button', key: `agent-msg-${a.id}`, text: `${pad}  message it`, action: { kind: 'fill', text: `Send ${named} this message: ` } })
+      out.push({ t: 'button', key: `agent-stop-${a.id}`, text: `${pad}  stop it`, action: { kind: 'fill', text: `Stop ${named}.` } })
+    } else {
+      out.push({ t: 'button', key: `agent-found-${a.id}`, text: `${pad}  what it found`, action: { kind: 'fill', text: `From convo's history, tell me what ${named} did: what it was asked, what it ran, what it found.` } })
+    }
+  }
+  return out
+}
+
 /** The whole pane: a header, the tabs, the tab's nodes, and how to use it. */
-export function panelNodes(o: { view: ConvoView | undefined; ledger: ConvoLedger | undefined; ui: ConvoUi; width: number; now: number; focused: boolean; agent?: string }): PanelNode[] {
+export function panelNodes(o: { view: ConvoView | undefined; ledger: ConvoLedger | undefined; ui: ConvoUi; width: number; now: number; focused: boolean; agent?: string; agents?: readonly ConvoAgent[] }): PanelNode[] {
   const { view, ui, width } = o
   if (!view) return [{ t: 'text', text: 'Reading this conversation’s history…', tone: 'dim' }]
   if (view.off) return [{ t: 'text', text: `History is off in this session: ${view.off}.`, tone: 'warn' }]
   const sees = !view.turns ? '' : view.context ? ` · from ${view.context.kind === 'keyframe' ? `keyframe ${view.context.n}` : 'a summary'} + ${view.context.turnsSince}` : ' · all in view'
   const who = o.agent ? `subagent ${o.agent.slice(0, 10)}` : `${view.sid.slice(0, 8)}${view.continues ? ` · continues ${view.continues.slice(0, 8)}` : ''}`
   const out: PanelNode[] = [{ t: 'text', text: fit(`${who} · ${view.turns} turn${view.turns === 1 ? '' : 's'}${o.agent ? '' : sees}${view.questions.length ? ` · ${view.questions.length} open question${view.questions.length === 1 ? '' : 's'}` : ''}`, width), tone: 'title' }]
-  out.push({ t: 'row', items: TABS.map(([tab, label], i) => ({ t: 'button', key: `tab-${tab}`, hotkey: String(i + 1), text: ui.tab === tab ? `[${label}]` : label, tone: ui.tab === tab ? 'bold' : 'dim', action: { kind: 'tab', tab } })) })
+  // The Agents tab says how many run, whichever tab is open
+  const running = (o.agents ?? []).filter(a => a.status === 'running' || a.status === 'waiting').length
+  const labelOf = (tab: Tab, label: string): string => (tab === 'agents' && running ? `${label} (${running})` : label)
+  out.push({ t: 'row', items: TABS.map(([tab, label], i) => ({ t: 'button', key: `tab-${tab}`, hotkey: String(i + 1), text: ui.tab === tab ? `[${labelOf(tab, label)}]` : labelOf(tab, label), tone: ui.tab === tab ? 'bold' : tab === 'agents' && running ? undefined : 'dim', action: { kind: 'tab', tab } })) })
   out.push({ t: 'text', text: '─'.repeat(Math.max(4, Math.min(width, 60))), tone: 'dim' })
   if (ui.tab === 'history') out.push(...historyNodes(view.history ?? [], ui, width, o.now, view.tip))
   else if (ui.tab === 'context') out.push(...contextNodes(o.ledger, width))
-  else out.push(...linesNodes(view, width))
-  out.push({ t: 'text', text: '' }, { t: 'text', text: o.focused ? 'Tab moves · Enter opens · 1 2 3 switch tabs · Esc back to the prompt' : 'ctrl+x tab to use this pane', tone: 'dim' })
+  else if (ui.tab === 'lines') out.push(...linesNodes(view, width))
+  else out.push(...agentNodes(o.agents ?? [], ui, width, o.now))
+  out.push({ t: 'text', text: '' }, { t: 'text', text: o.focused ? 'Tab moves · Enter opens · 1–4 switch tabs · Esc back to the prompt' : 'ctrl+x tab to use this pane', tone: 'dim' })
   return out
 }
