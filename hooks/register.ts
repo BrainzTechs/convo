@@ -86,13 +86,18 @@ async function publish($: EngineInterface, look = false): Promise<void> {
       return
     }
     const io = ioOf($)
+    // /resume and /clear switch the session with no event of their own: the tick notices, so the pane follows at once
+    const id = await $.session.id().catch(() => S.sid)
+    if (id && S.sid && id !== S.sid) await useSession(io, id)
     let refsNow = published.refs
     if (look) {
       const r = await io.process.run(['git', `--git-dir=${S.repo}`, 'for-each-ref', '--format=%(objectname)', 'refs/heads/'], { timeoutMs: 10_000 })
       refsNow = r.stdout
     }
     // A session with nothing of its own yet is looked at again on the slow tick: a resumed transcript may fill in after it
-    if (published.moved === S.moved && published.sid === S.sid && published.refs === refsNow && !(look && published.empty)) return
+    // and a session's state starts empty, so the view is written again when the state lost it
+    const shown = (await $.state.get(VIEW).catch(() => undefined))?.value
+    if (published.moved === S.moved && published.sid === S.sid && published.refs === refsNow && !(look && published.empty) && shown?.sid === S.sid) return
     const at = { moved: S.moved, sid: S.sid }
     const view = await buildView(io, S.sid)
     lastTurns = view.turns

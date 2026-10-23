@@ -358,6 +358,20 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('and the view has the tip to read them from', w.view()?.tip === w.git('rev-parse', `session/${A}`))
   },
 
+  async resumeNewId(dir, check) {
+    const w = await world(dir)
+    await w.start(A)
+    await w.turn(FIRST, 'Noted.')
+    await w.turn('Port is 8080.', 'Noted.')
+    await w.timers()
+    // /resume carries the conversation on under a new id, with no event of its own and the session's state empty
+    await w.fork(B)
+    w.state.delete('convo/view')
+    await w.timers()
+    const v = w.view()
+    check('the pane follows the switch on its own, with the turns it continues', v?.sid === B && v?.turns === 2 && v?.continues === A, JSON.stringify({ sid: v?.sid, turns: v?.turns, continues: v?.continues }))
+  },
+
   async fork(dir, check) {
     const w = await world(dir)
     await w.start(A)
