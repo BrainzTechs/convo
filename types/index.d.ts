@@ -89,6 +89,8 @@ export type ConvoAgent = {
   /** Its last few tool calls, newest last, and how many times in a row the last one repeats. */
   recent: string[]
   repeat: number
+  /** What it handed back: its answer, in one paragraph. */
+  result?: string
   /** It was named in a "looks stuck" toast already. */
   warned?: boolean
 }

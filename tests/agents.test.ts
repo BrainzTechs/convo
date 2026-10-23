@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { agentFacts, callDetail, called, dur, endToast, finished, ordered, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, STUCK_MS } from '../hooks/agents.ts'
+import { agentFacts, callDetail, called, HANDBACK, dur, endToast, finished, ordered, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, STUCK_MS } from '../hooks/agents.ts'
 import { agentNodes, panelNodes } from '../hooks/panel.ts'
 import type { ConvoAgent, ConvoView } from '../types/index.d.ts'
 
@@ -23,6 +23,19 @@ describe('subagents as they run', () => {
     expect(callDetail('Bash', { command: 'go test ./...   -run X' })).toBe('"go test ./... -run X"')
     expect(callDetail('WebFetch', { url: 'https://x.dev', prompt: 'p' })).toBe('https://x.dev')
     expect(callDetail('Other', {})).toBe('')
+  })
+
+  test('a handback is its result, not a call; its answer at the end is the result', () => {
+    let a = called(base(), 'Bash', { command: 'make' }, T0)
+    a = returned(a, false, T0 + 1)
+    a = called(a, 'SubagentHandback', { summary: 'done. The command printed\n step 1 through step 8.' }, T0 + 2)
+    expect(HANDBACK.has('SubagentHandback')).toBe(true)
+    expect(a).toMatchObject({ tools: 1, recent: ['Bash "make"'], result: 'done. The command printed step 1 through step 8.' })
+    expect(a.now).toBeUndefined()
+    expect(finished(a, 'done', T0 + 3).result).toBe('done. The command printed step 1 through step 8.')
+    expect(finished(a, 'done', T0 + 3, 'Two callers: register.ts and tools.ts.').result).toBe('Two callers: register.ts and tools.ts.')
+    expect(finished(base(), 'done', T0, '   ').result).toBeUndefined()
+    expect(finished(base(), 'done', T0, 'x'.repeat(500)).result).toHaveLength(400)
   })
 
   test('it looks stuck in one call, repeating itself, or with nothing new', () => {
@@ -63,7 +76,7 @@ describe('subagents as they run', () => {
     const now = T0 + 130_000
     let a = stepped(base(), { uncached: 2, read: 60_000, write: 1000, output: 200, usd: 0.09 }, T0)
     a = called(a, 'Grep', { pattern: 'assembleTurn' }, now - 12_000)
-    const done = { ...finished(base({ id: 'b2', type: 'general-purpose', task: 'Fix the transfer test' }), 'done', T0 + 60_000), merged: 14 }
+    const done = { ...finished(base({ id: 'b2', type: 'general-purpose', task: 'Fix the transfer test' }), 'done', T0 + 60_000, 'Fixed: the balance was read before the transfer committed.'), merged: 14 }
     const text = agentNodes([a, done], { tab: 'agents' }, 90, now).map(n => n.text)
     expect(text).toEqual([
       '⟳ Explore · Find assembleTurn callers',
@@ -71,8 +84,14 @@ describe('subagents as they run', () => {
       '│   now: Grep "assembleTurn" (12s)',
       '✓ general-purpose · Fix the transfer test',
       '│   1m00s · 0 requests',
+      '│   result: Fixed: the balance was read before the transfer committed.',
       '│   merged into turn 14',
     ])
+    // Open, the result is whole, wrapped
+    const long = { ...done, result: 'Fixed: the balance was read before the transfer committed, so the second read saw the old value; it now waits for the commit.' }
+    const opened = agentNodes([long], { tab: 'agents', open: 'agent:b2' }, 60, now).map(n => n.text)
+    expect(opened.slice(2, 5)).toEqual(['│   result: Fixed: the balance was read before the transfer', '│     committed, so the second read saw the old value; it', '│     now waits for the commit.'])
+    expect(opened.every(t => t.length <= 60)).toBe(true)
     const open = agentNodes([a], { tab: 'agents', open: 'agent:a1' }, 90, now)
     expect(open.map(n => n.text).slice(3)).toEqual(['    · Grep "assembleTurn"', '  message it', '  stop it'])
     expect(open.find(n => n.text === '  stop it')).toMatchObject({ t: 'button', action: { kind: 'fill', text: 'Stop subagent a1 ("Find assembleTurn callers").' } })

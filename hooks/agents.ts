@@ -56,8 +56,22 @@ export function callDetail(tool: string, input: unknown): string {
   return tool === 'Bash' || tool === 'Grep' || tool === 'Glob' ? (cut ? `"${cut}"` : '') : cut
 }
 
-/** A tool call the agent made. */
+/** Claude Code's step that hands a subagent's answer back: its result, not work it did. */
+export const HANDBACK = new Set(['SubagentHandback'])
+
+/** An agent's answer in one paragraph, short enough for its row. */
+export function resultText(text: string): string {
+  const one = text.replace(/\s+/g, ' ').trim()
+  return one.length > 400 ? `${one.slice(0, 399)}…` : one
+}
+
+/** A tool call the agent made; a handback is kept as its result instead. */
 export function called(a: ConvoAgent, tool: string, input: unknown, at: number): ConvoAgent {
+  if (HANDBACK.has(tool)) {
+    const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+    const text = Object.values(i).find((v): v is string => typeof v === 'string' && v.trim() !== '') ?? ''
+    return text ? { ...a, result: resultText(text), lastAt: at } : { ...a, lastAt: at }
+  }
   const line = `${tool} ${callDetail(tool, input)}`.trim()
   const same = a.recent.at(-1) === line
   return { ...a, now: { tool, detail: callDetail(tool, input), since: at }, recent: [...a.recent, line].slice(-RECENT), repeat: same ? a.repeat + 1 : 0, lastAt: at }
@@ -69,10 +83,11 @@ export function returned(a: ConvoAgent, isError: boolean, at: number): ConvoAgen
   return { ...rest, tools: a.tools + 1, errors: a.errors + (isError ? 1 : 0), lastAt: at }
 }
 
-/** The agent ended: its answer, a failure, or stopped. */
-export function finished(a: ConvoAgent, status: 'done' | 'failed' | 'killed', at: number): ConvoAgent {
+/** The agent ended: its answer (which becomes its result), a failure, or stopped. */
+export function finished(a: ConvoAgent, status: 'done' | 'failed' | 'killed', at: number, answer?: string): ConvoAgent {
   const { now: _done, ...rest } = a
-  return { ...rest, status, ended: a.ended ?? at, lastAt: at }
+  const result = answer?.trim() ? resultText(answer) : a.result
+  return { ...rest, status, ended: a.ended ?? at, lastAt: at, ...(result ? { result } : {}) }
 }
 
 /** The engine's word for an agent's state, as the list says it; undefined leaves ours. */

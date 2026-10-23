@@ -39,7 +39,7 @@ import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
 import type { ConvoAgent, ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
-import { called, endToast, finished, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed } from './agents.ts'
+import { HANDBACK, called, endToast, finished, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed } from './agents.ts'
 import { panelNodes, type Action, type PanelButton } from './panel.ts'
 import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
@@ -141,6 +141,8 @@ async function act($: EngineInterface, a: Action): Promise<void> {
 // the session's state holds the list for the pane and across a reload.
 const AGENTS = { plugin: 'convo', key: 'agents' } as const
 const runs = new Map<string, ConvoAgent>()
+/** Handback calls under way, whose results are not tool calls of the agent's. */
+const handbacks = new Set<string>()
 let runsDirty = false
 /** The session's cost when last read, so each request's share goes to the loop that made it. */
 let costSeen: number | undefined
@@ -166,9 +168,9 @@ function showStatus($: EngineInterface, base?: string | null): void {
 }
 
 /** An agent that ended: kept as ended, and a toast when it is worth one. */
-function endRun($: EngineInterface, a: ConvoAgent, how: 'done' | 'failed' | 'killed'): void {
+function endRun($: EngineInterface, a: ConvoAgent, how: 'done' | 'failed' | 'killed', answer?: string): void {
   if (!isLive(a)) return
-  const ended = finished(a, how, Date.now())
+  const ended = finished(a, how, Date.now(), answer)
   setRun(ended)
   const toast = endToast(ended, Date.now())
   if (toast) $.ui.toast(toast)
@@ -777,9 +779,15 @@ export const register: Register = (on, options) => {
     const run = e.agentId ? runs.get(e.agentId) : undefined
     if (run && (e.door === 'response' || e.door === 'tool-result')) {
       let a = run
-      for (const b of (Array.isArray(e.message.content) ? e.message.content : []) as { type?: string; name?: string; input?: unknown; is_error?: boolean }[]) {
-        if (b.type === 'tool_use' && b.name) a = called(a, b.name, b.input, Date.now())
-        else if (b.type === 'tool_result') a = returned(a, b.is_error === true, Date.now())
+      for (const b of (Array.isArray(e.message.content) ? e.message.content : []) as { type?: string; id?: string; tool_use_id?: string; name?: string; input?: unknown; is_error?: boolean }[]) {
+        if (b.type === 'tool_use' && b.name) {
+          // A handback is the agent's result, not a call: its own result is not counted either
+          if (HANDBACK.has(b.name) && b.id) handbacks.add(b.id)
+          a = called(a, b.name, b.input, Date.now())
+        } else if (b.type === 'tool_result') {
+          if (b.tool_use_id && handbacks.delete(b.tool_use_id)) continue
+          a = returned(a, b.is_error === true, Date.now())
+        }
       }
       if (a !== run) setRun(a)
     }
@@ -1040,7 +1048,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     // A followed subagent's run ended, by its answer, an error, or being stopped
     const run = e.agentId ? runs.get(e.agentId) : undefined
-    if (run) endRun($, run, e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.reason === 'aborted' ? 'killed' : 'done')
+    if (run) endRun($, run, e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.reason === 'aborted' ? 'killed' : 'done', e.reason === 'answer' ? e.answer : undefined)
     try {
       const agentId = e.agentId
       const rows = agentId ? (agentRows.get(agentId) ?? []) : S.mainRows

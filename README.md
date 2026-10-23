@@ -392,12 +392,14 @@ the last dozen after they end:
 │   ⚠ looks stuck: in Bash for 6m12s
 ✓ general-purpose · Fix the transfer test
 │   1m00s · 6 requests · 9 tool calls · 40k in · ~$0.04
+│   result: Fixed: the balance was read before the transfer committed.
 │   merged into turn 14
 ```
 
 Each row says how long it has run, its requests, tool calls (and how many
 failed), tokens and cost, and what it is doing now; a subagent's own
-subagents sit under it. It looks stuck when one call has run five minutes,
+subagents sit under it. A finished one shows what it handed back as its
+result, in a line, or whole when its row is open. It looks stuck when one call has run five minutes,
 nothing new has come for five, or it makes the same call three times in a
 row. Open a row (Enter) for its last tool calls and buttons that put a
 prompt in your box: **message it** and **stop it** while it runs (Claude

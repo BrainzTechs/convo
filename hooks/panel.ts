@@ -153,6 +153,11 @@ export function agentNodes(agents: readonly ConvoAgent[], ui: ConvoUi, width: nu
       : a.status === 'failed' ? 'failed'
       : a.status === 'killed' ? 'stopped'
       : a.merged !== undefined ? `merged into turn ${a.merged}` : a.background ? 'finished; merges into the next turn' : 'finished'
+    // What it handed back, on the row itself: in a line, or whole when the row is open
+    if (a.result) {
+      if (open) for (const [i, line] of wrapRow(`result: ${a.result}`, width - pad.length - 4).entries()) out.push({ t: 'text', text: `${pad}│   ${line}`, tone: i ? 'dim' : undefined })
+      else out.push({ t: 'text', text: fit(`${pad}│   result: ${a.result}`, width) })
+    }
     out.push({ t: 'text', text: fit(`${pad}│   ${where}`, width), tone: a.status === 'failed' ? 'warn' : a.status === 'running' ? undefined : 'dim' })
     const stuck = stuckOf(a, now)
     if (stuck) out.push({ t: 'text', text: fit(`${pad}│   ⚠ looks stuck: ${stuck}`, width), tone: 'warn' })
