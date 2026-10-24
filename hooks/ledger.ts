@@ -75,7 +75,7 @@ export function addStep(l: ConvoLedger, s: Step, o: { compactedAt?: number; turn
       out.missTokens = (l.missTokens ?? 0) + s.write
     }
   }
-  out.last[s.loop] = { at: s.at, model: s.model, input: inputOf(s) }
+  out.last[s.loop] = { at: s.at, model: s.model, input: inputOf(s), output: s.output }
   return out
 }
 

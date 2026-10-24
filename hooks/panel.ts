@@ -12,6 +12,7 @@ import type { PaneRow } from './view.ts'
 import { paneRows, wrapRow } from './view.ts'
 import { k, ledgerRows } from './ledger.ts'
 import { agentFacts, dur, modelName, ordered, stuckOf } from './agents.ts'
+import { warmthOf, warmthRows } from './warmth.ts'
 
 export type Tab = ConvoUi['tab']
 export type Action = { kind: 'tab'; tab: Tab } | { kind: 'toggle'; id: string; path?: string; tip?: string } | { kind: 'fill'; text: string }
@@ -104,14 +105,16 @@ export function gauge(now: number, limit: number, width: number): string {
   return `▕${'█'.repeat(filled)}${'░'.repeat(cells - filled)}▏ ${k(now)} / ${k(limit)}`
 }
 
-/** The Context tab: the gauge, then the ledger's lines. */
-export function contextNodes(l: ConvoLedger | undefined, width: number): LineNode[] {
+/** The Context tab: the gauge, how warm the prompt cache is, then the ledger's lines. */
+export function contextNodes(l: ConvoLedger | undefined, width: number, now = Date.now()): LineNode[] {
   if (!l?.requests) return [{ t: 'text', text: 'No requests counted yet in this window.', tone: 'dim' }]
   const out: LineNode[] = []
-  const now = l.last.main?.input
+  const input = l.last.main?.input
   const limit = l.compactAt ?? l.autoCompactAt
   // The ledger's own line says where it compacts and how
-  if (now && limit) out.push({ t: 'text', text: gauge(now, limit, width) })
+  if (input && limit) out.push({ t: 'text', text: gauge(input, limit, width) })
+  const main = l.last.main
+  if (main && l.cache) for (const r of warmthRows(warmthOf(main, now, l.cache, l.cache.rate))) for (const t of wrapRow(r.text, width)) out.push({ t: 'text', text: t, tone: r.tone })
   for (const r of ledgerRows(l, width)) if (r.text) out.push({ t: 'text', text: r.text, tone: r.tone })
   return out
 }
@@ -191,7 +194,7 @@ export function panelNodes(o: { view: ConvoView | undefined; ledger: ConvoLedger
   out.push({ t: 'row', items: TABS.map(([tab, label], i) => ({ t: 'button', key: `tab-${tab}`, hotkey: String(i + 1), text: ui.tab === tab ? `[${labelOf(tab, label)}]` : labelOf(tab, label), tone: ui.tab === tab ? 'bold' : tab === 'agents' && running ? undefined : 'dim', action: { kind: 'tab', tab } })) })
   out.push({ t: 'text', text: '─'.repeat(Math.max(4, Math.min(width, 60))), tone: 'dim' })
   if (ui.tab === 'history') out.push(...historyNodes(view.history ?? [], ui, width, o.now, view.tip))
-  else if (ui.tab === 'context') out.push(...contextNodes(o.ledger, width))
+  else if (ui.tab === 'context') out.push(...contextNodes(o.ledger, width, o.now))
   else if (ui.tab === 'lines') out.push(...linesNodes(view, width))
   else out.push(...agentNodes(o.agents ?? [], ui, width, o.now))
   out.push({ t: 'text', text: '' }, { t: 'text', text: o.focused ? 'Tab moves · Enter opens · 1–4 switch tabs · Esc back to the prompt' : 'ctrl+x tab to use this pane', tone: 'dim' })

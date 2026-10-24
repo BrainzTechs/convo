@@ -166,6 +166,7 @@ with safe defaults:
 | Old tool output | Cleared from the context once a lot piles up (below) | `clearOldOutput` | on |
 | Compaction | A keyframe at a size you choose, not only at Claude Code's limit (see Compacting earlier, above) | `compactAt` (tokens) | off (0) |
 | A new conversation | Begins with a brief of where this project's last conversation left off (below) | `brief` | on |
+| Prompt cache | Measured only: how long until it goes cold, and what a cold send costs (below) | `cacheTtl` (`5m`, `1h`) | by plan |
 | Skills and agent types | Measured only: the pane says what this project has not used | | |
 
 Core tools (Read, Edit, Write, Bash, Grep, Glob, Agent, Skill, ToolSearch,
@@ -181,9 +182,13 @@ project's history folder), seeded once from the turns git already holds.
 Agent types are judged only once a week of convo's own records exists, as
 older turns do not name them.
 
-The pane's Context section shows it all for the window:
+The pane's Context section shows it all for the window, under a gauge of
+the context against where it compacts and how warm the prompt cache is:
 
 ```
+▕███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▏ 67k / 967k
+  prompt cache: warm · goes cold in 38m (1h cache, by plan)
+    a send now reads 67k from the cache (~$0.03); once cold it re-caches it (~$0.42)
 Context · this window · $0.42
   every request carries 31k of setup: skills 9.8k, system tools (estimated) 8.5k, custom agents 6.5k
   held back 17k of tools unused here, behind ToolSearch: Artifact 11k, Workflow 2.0k, SendFeedback 2.0k, ScheduleWakeup 1.8k and 2 more
@@ -195,6 +200,18 @@ Context · this window · $0.42
   81k in over 2 requests, 200 out
   cache: 98% read from cache · no misses
 ```
+
+The prompt cache line counts down from the conversation's last request to
+the cached prefix expiring: an hour on a subscription (the session reports
+its rate-limit windows), or once a request is seen reading the cache after
+more than five idle minutes; five minutes with an API key. Set `cacheTtl`
+(`5m` or `1h`) when Claude Code's `promptCacheTtl` setting says otherwise. Its
+last five minutes read "cooling", and once it is cold a toast says what the
+next message will cost to cache again (when that is over 20k tokens). The
+prices are the subagents' estimate (list prices as they stand to each
+other, at the rate the session's requests have cost); on a subscription
+they are a yardstick, not a bill. convo sends nothing to keep the cache
+warm: a mod such as cache-tax does that.
 
 It counts every model request as Claude Code reports it (main thread and
 subagents), takes sizes from `/context`'s own breakdown (counted locally, no
@@ -518,6 +535,7 @@ afterwards.
 | `view.ts` | What the pane beside the chat shows, built from git (`types/index.d.ts` declares it) |
 | `timeline.ts`, `panel.ts` | The pane's History from git, and its four tabs as lines and buttons |
 | `agents.ts` | Subagents as they run: progress, cost, looking stuck, the status line and toasts |
+| `warmth.ts` | How warm the prompt cache is, and what the next send costs either side of it going cold |
 | `ledger.ts` | The token ledger and cache misses the pane shows |
 | `clearing.ts` | Which old tool outputs to clear, their stubs, and when it pays |
 | `condense.ts` | Condensing tool output as it arrives: failures kept, the rest counted |

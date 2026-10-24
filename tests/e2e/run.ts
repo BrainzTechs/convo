@@ -393,6 +393,23 @@ const scenarios: Record<string, (dir: string, check: Check) => Promise<void>> = 
     check('one the engine lists as failed is a toast and a failed row', list().find(a => a.id === 'bg0002')?.status === 'failed' && w.toasts.some(t => t.startsWith('subagent "Lint everything" failed')), JSON.stringify(w.toasts))
   },
 
+  async cacheWarmth(dir, check) {
+    const w = await world(dir)
+    await w.start(A, true)
+    await w.turn(FIRST, 'Noted.')
+    await w.timers()
+    const l = w.ledger()
+    // The harness reports no rate-limit windows, as with an API key: five minutes, by plan
+    check('the cache lifetime and rate reach the ledger', l?.cache?.ttl === '5m' && l.cache.from === 'plan' && l.cache.rate > 0, JSON.stringify(l?.cache))
+    const text = (await import('../../hooks/panel.ts')).contextNodes(l, 120, Date.now()).map((n: any) => n.text).join('\n')
+    check('the Context tab says it is warm, and what a send costs either side', /prompt cache: (warm|cooling) · goes cold in /.test(text) && /once cold it re-caches it \(/.test(text), text)
+    const w2 = await world(join(dir, 'b'), {}, { cacheTtl: '1h' })
+    await w2.start(B, true)
+    await w2.turn(FIRST, 'Noted.')
+    await w2.timers()
+    check('the setting says how long it lasts', w2.ledger()?.cache?.ttl === '1h' && w2.ledger()?.cache?.from === 'setting', JSON.stringify(w2.ledger()?.cache))
+  },
+
   async resumeNewId(dir, check) {
     const w = await world(dir)
     await w.start(A)

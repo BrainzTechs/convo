@@ -1,6 +1,6 @@
 {
   "name": "convo",
-  "version": "0.19.7",
+  "version": "0.20.0",
   "description": "Keeps every Claude Code conversation as git history: one commit per turn, a branch per session and subagent, keyframes in place of compaction, merge and recall by asking, all local and redacted.",
   "author": {
     "name": "Brainztechs"
@@ -50,6 +50,12 @@
       "title": "Start with a brief",
       "description": "A new conversation (or one after /clear) starts with where this project's last conversation left off: its pins, decisions and open tasks, from the notes convo keeps.",
       "default": true
+    },
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt cache lifetime",
+      "description": "How long Claude Code's prompt cache lasts, for the warm or cold line in convo's Context tab: 5m or 1h. Empty: an hour on a subscription (or once a request is seen reading the cache after five idle minutes), five minutes with an API key. Set it when your promptCacheTtl setting says otherwise.",
+      "default": ""
     }
   }
 }

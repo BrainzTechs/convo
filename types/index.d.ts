@@ -180,7 +180,7 @@ export type ConvoLedger = {
   /** Tokens the window's first request cached: a new window, or a resumed session, starts with a cold cache. */
   warmup?: number
   /** Each loop's last request: when, on which model, and its whole input. */
-  last: Record<string, { at: number; model: string; input: number }>
+  last: Record<string, { at: number; model: string; input: number; output?: number }>
   /** Old tool output convo cleared from the context: how often, how many outputs, and their tokens. */
   cleared?: { times: number; outputs: number; tokens: number }
   /** The project's last seven days, as the pane words them. */
@@ -194,6 +194,8 @@ export type ConvoLedger = {
   /** Where the conversation compacts: convo's setting, and Claude Code's own limit. */
   compactAt?: number
   autoCompactAt?: number
+  /** The prompt cache's lifetime and where it came from, and the dollars a list-price unit has cost (agents.ts weightOf), for the warm or cold line. */
+  cache?: { ttl: '5m' | '1h'; from: 'setting' | 'seen' | 'plan'; rate: number }
 }
 
 declare module 'claude-code' {

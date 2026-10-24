@@ -39,6 +39,7 @@ import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
 import type { ConvoAgent, ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
+import { coldToast, ttlOf, warmthOf } from './warmth.ts'
 import { HANDBACK, called, endToast, finished, priced, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, weightOf } from './agents.ts'
 import { panelNodes, type Action, type PanelButton } from './panel.ts'
 import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
@@ -179,6 +180,40 @@ async function refreshRate($: EngineInterface): Promise<void> {
   if (pricing.weight > 0) pricing.rate = (cost - pricing.since) / pricing.weight
 }
 
+// ── How warm the prompt cache is ─────────────────────────────────────
+// The Context tab counts down to the cached prefix expiring and prices the
+// next send either side of it (warmth.ts); a toast when it has gone cold.
+/** A request was seen reading the cache after more than five idle minutes: it lasts an hour here. */
+let seenHour = false
+/** The main thread's last request whose going cold was a toast already. */
+let coldToastFor: number | undefined
+
+/** Every 30 s: the cache's lifetime and the rate into the ledger, the countdown redrawn, and a toast once it is cold. */
+async function tickCache($: EngineInterface): Promise<void> {
+  try {
+    const main = ledger?.last.main
+    if (!ledger || !main) return
+    await refreshRate($)
+    const limits = (await $.session.usage().catch(() => undefined))?.rateLimits ?? []
+    const ttl = ttlOf({ setting: settings.cacheTtl, seenHour, subscription: limits.some(r => /five_hour|seven_day/.test(r.kind)) })
+    const cache = { ...ttl, rate: pricing.rate }
+    const was = ledger.cache
+    if (!was || was.ttl !== cache.ttl || was.from !== cache.from || Math.abs(was.rate - cache.rate) > was.rate * 0.01) {
+      ledger = { ...ledger, cache }
+      await saveLedger($)
+    }
+    const w = warmthOf(main, Date.now(), ttl, pricing.rate)
+    if (w.state === 'cold' && coldToastFor !== main.at) {
+      coldToastFor = main.at
+      const toast = coldToast(w)
+      if (toast) $.ui.toast(toast)
+    }
+    $.ui.invalidate('ui.render')
+  } catch (err) {
+    $.ui.log(`convo: the cache's warmth not shown: ${String(err).slice(0, 200)}`, { to: 'debug' })
+  }
+}
+
 /** An agent that ended: kept as ended, and a toast when it is worth one. */
 function endRun($: EngineInterface, a: ConvoAgent, how: 'done' | 'failed' | 'killed', answer?: string): void {
   if (!isLive(a)) return
@@ -291,7 +326,7 @@ let toolRate: number | undefined
 const TOOL_RATE_GUESS = 0.25
 
 /** The settings (/config, under convo), as the module was loaded with them. */
-const settings = { compactAt: 0, clearOldOutput: true, holdBackTools: true, keepTools: new Set<string>(), condenseOutput: true, neverCondense: new Set<string>(), brief: true }
+const settings = { compactAt: 0, clearOldOutput: true, holdBackTools: true, keepTools: new Set<string>(), condenseOutput: true, neverCondense: new Set<string>(), brief: true, cacheTtl: '' }
 
 // ── The brief a new conversation starts with ─────────────────────────
 // The first prompt of an empty conversation (a new session, or after /clear)
@@ -653,6 +688,7 @@ export const register: Register = (on, options) => {
   settings.condenseOutput = o.condenseOutput !== false
   settings.neverCondense = parseKeep(o.neverCondense)
   settings.brief = o.brief !== false
+  settings.cacheTtl = typeof o.cacheTtl === 'string' ? o.cacheTtl.trim() : ''
 
   on('session.start', async ($, e, next) => {
     const io = ioOf($)
@@ -683,6 +719,8 @@ export const register: Register = (on, options) => {
     pricing.since = (await $.session.usage().catch(() => undefined))?.cost?.usd
     pricing.weight = 0
     $.clock.every(2000, () => tickAgents($))
+    seenHour = (await $.store.get('cache-seen-1h').catch(() => undefined)) === true
+    $.clock.every(30_000, () => tickCache($))
     if (!S.gitOk) {
       showStatus($, `history is off (${why})`)
     } else {
@@ -1024,6 +1062,12 @@ export const register: Register = (on, options) => {
     try {
       const u = response.usage
       if (u) {
+        // A main request that read the cache after more than five idle minutes: the cache lasts an hour here
+        const prev = ledger?.last.main
+        if (!e.agentId && !seenHour && prev && prev.input > 1000 && Date.now() - prev.at > 6 * 60_000 && u.cache_read_input_tokens >= 0.8 * prev.input) {
+          seenHour = true
+          await $.store.set('cache-seen-1h', true)
+        }
         ledger = addStep(ledger ?? emptyLedger(Date.now()), { loop: e.agentId ?? 'main', model: u.model || e.model, at: Date.now(), uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens }, { compactedAt: S.compactedAt, turn: e.agentId ? undefined : turnNow })
         addRequest((usage.days ??= {}), dayOf(Date.now()), { uncached: u.input_tokens, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, output: u.output_tokens })
         await saveLedger($)

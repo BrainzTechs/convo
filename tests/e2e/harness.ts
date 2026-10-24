@@ -240,6 +240,7 @@ export class World {
       log: (text: string) => void this.logs.push(text),
       status: (t?: string) => void this.statuses.push(t),
       toast: (t: string) => void this.toasts.push(t),
+      invalidate: () => undefined,
       // No surface here: a pane opens undrawn, as in a -p run
       open: async (pane: { id: string }) => {
         this.opened.push(pane.id)
