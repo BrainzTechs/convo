@@ -1,5 +1,8 @@
-// Pure helpers for the coordinator feature: when convo is on, and (later) how
-// live chats are told apart. No engine calls here, so every rule is a plain test.
+// Pure helpers for the coordinator feature: when convo is on, and how live
+// chats are told apart. No engine calls here, so every rule is a plain test.
+
+/** A session that has written no heartbeat for this long is gone. */
+export const GONE_MS = 180_000
 
 const trimSlashes = (p: string): string => (p.length > 1 ? p.replace(/\/+$/, '') || '/' : p)
 
@@ -66,3 +69,68 @@ export function parseBeat(text: string): Beat | undefined {
 }
 
 export const beatText = (b: Beat): string => JSON.stringify(b)
+
+/** Another chat running in the coordinator's folder or below it, as its heartbeat file and its project folder tell. */
+export type Peer = { sid: string; cwd: string; repo: string; mtimeMs: number; beat?: Beat }
+
+/** Whether a chat is one the coordinator should show: alive, someone types into it, inside its folder, and not itself. */
+export function isPeer(p: Peer, o: { coordCwd: string; selfSid: string; now: number }): boolean {
+  return (
+    isInside(o.coordCwd, p.cwd) &&
+    o.now - p.mtimeMs < GONE_MS &&
+    p.beat?.state !== 'ended' &&
+    p.beat?.interactive !== false &&
+    p.sid !== o.selfSid
+  )
+}
+
+/** Working chats first, then the one started most recently; a chat without a beat goes by its file's time. */
+export function ordered(peers: readonly Peer[]): Peer[] {
+  const working = (p: Peer): number => (p.beat?.state === 'working' ? 1 : 0)
+  return [...peers].sort((a, b) => working(b) - working(a) || (b.beat?.since ?? b.mtimeMs) - (a.beat?.since ?? a.mtimeMs))
+}
+
+/** A peer's folder as the coordinator names it: `.` for its own, worktrees as `wt <name>` (`backend/wt agent-a1b2`). */
+export function relName(coordCwd: string, cwd: string): string {
+  if (!isInside(coordCwd, cwd)) return cwd
+  const root = trimSlashes(coordCwd)
+  const rel = trimSlashes(cwd).slice(root === '/' ? 1 : root.length + 1)
+  if (rel === '') return '.'
+  return `/${rel}`.replace('/.claude/worktrees/', '/wt ').slice(1)
+}
+
+/**
+ * Whether a chat is using `folder`: one works in it or below it, or holds it
+ * (or a folder around it) for itself or a subagent. A folder merely under a
+ * chat's own folder is free unless that chat has a subagent worktree whose
+ * path is unknown, which could be this one.
+ */
+export function inUse(folder: string, peers: readonly Peer[]): boolean {
+  return peers.some(p => {
+    if (isInside(folder, p.cwd)) return true
+    if ((p.beat?.holds ?? []).some(h => isInside(folder, h) || isInside(h, folder))) return true
+    return isInside(p.cwd, folder) && (p.beat?.holdsUnknown ?? 0) > 0
+  })
+}
+
+const OUTSIDE_CONVO = new Set(['cli', 'claude-desktop'])
+
+/**
+ * The session a transcript's first lines belong to, when it is a chat a person
+ * types into (not an SDK run) inside `coordCwd`. `head` is cut at a byte
+ * limit, so a last line may be torn: a line that does not parse is skipped.
+ */
+export function isUnseenHead(head: string, coordCwd: string): { sid: string } | undefined {
+  for (const line of head.split('\n')) {
+    let j: unknown
+    try {
+      j = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (typeof j !== 'object' || j === null) continue
+    const { entrypoint, cwd, sessionId } = j as { entrypoint?: unknown; cwd?: unknown; sessionId?: unknown }
+    if (typeof entrypoint === 'string' && OUTSIDE_CONVO.has(entrypoint) && typeof cwd === 'string' && typeof sessionId === 'string' && isInside(coordCwd, cwd)) return { sid: sessionId }
+  }
+  return undefined
+}
