@@ -102,8 +102,12 @@ chat itself, and never a chat outside the folder.
 Each row shows the chat's folder relative to this one, whether it is working
 or idle and for how long, and its prompt (or its last prompt, when idle).
 Working chats come first. The tab's label counts the working ones. Press a
-row to see its last 5 turn subjects. The last line counts chats here that
-convo isn't recording: chats in a folder you excluded, or started without convo.
+row to see its last 5 turn subjects, or "could not be read (git failed)" when
+git could not read that chat's history (as opposed to "no turns recorded yet").
+The last line counts chats here that convo isn't recording: chats in a folder
+you excluded, or started without convo. A chat that `/clear`s, resumes another
+or branches drops off the list under its old id at once, and shows up under
+its new one.
 
 Live refreshes only while the pane is open, and reads git only while the Live
 tab is open. With the pane closed, nothing is scanned.
@@ -114,9 +118,11 @@ asks your permission first, since it reads beyond this chat ("Allow this
 session" makes it one question). It lists each live chat with its folder,
 state, prompt, recent turns and the files it touched, and ends with an
 `In use:` line: the absolute folders that live chats are in, or have given to
-a worktree subagent. A worktree under a chat whose worktree subagent has a
-path convo could not learn counts as possibly in use, so it errs on the side
-of calling a worktree busy. Set `chat` to a folder or a session id prefix and
+a worktree subagent, and the folders of the chats here convo isn't recording.
+A worktree subagent's folder counts from its first turn, however its worktree
+was asked for (the Agent call or the agent's own definition). A worktree under
+a chat whose worktree subagent has a path convo could not learn counts as
+possibly in use, so it errs on the side of calling a worktree busy. Set `chat` to a folder or a session id prefix and
 it reads that chat's last turns in full.
 
 ### Where convo is off
