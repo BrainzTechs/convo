@@ -69,4 +69,49 @@ describe('the off switch', () => {
     expect(S.active).toBe(false)
     expect(logs.join('\n')).toContain('convo: off in this session: not interactive')
   })
+
+  /** A `$` that allows only reading the environment and the debug log: anything else is a failure. */
+  const strictStart = (env: Record<string, string>, logs: string[]) =>
+    new Proxy(
+      {},
+      {
+        get: (_t, k) => {
+          if (k === 'env') return { get: async (name: string) => env[name] }
+          if (k === 'ui') {
+            return new Proxy({}, {
+              get: (_u, m) => {
+                if (m === 'log') return (t: string) => void logs.push(t)
+                throw new Error(`touched $.ui.${String(m)}`)
+              },
+            })
+          }
+          if (typeof k === 'symbol' || k === 'then') return undefined
+          throw new Error(`touched $.${String(k)}`)
+        },
+      },
+    )
+
+  test('an interactive session in an excluded folder stays off and touches nothing', async () => {
+    const { on, seen } = recorder()
+    register(on, { excludeFolders: '~/x' })
+    S.active = true
+    const start = seen.find(s => s.event === 'session.start')!.hook
+    const logs: string[] = []
+    const got = await start(strictStart({ HOME: '/h' }, logs), { cwd: '/h/x/proj', isInteractive: true, surface: 'terminal' }, () => SENTINEL)
+    expect(got).toBe(SENTINEL)
+    expect(S.active).toBe(false)
+    expect(logs.join('\n')).toContain('convo: off in this session: excluded folder /h/x')
+  })
+
+  test('CONVO_FORCE=1 does not turn convo on in an excluded folder', async () => {
+    const { on, seen } = recorder()
+    register(on, { excludeFolders: '~/x' })
+    S.active = true
+    const start = seen.find(s => s.event === 'session.start')!.hook
+    const logs: string[] = []
+    const got = await start(strictStart({ HOME: '/h', CONVO_FORCE: '1' }, logs), { cwd: '/h/x/proj', isInteractive: false, surface: null }, () => SENTINEL)
+    expect(got).toBe(SENTINEL)
+    expect(S.active).toBe(false)
+    expect(logs.join('\n')).toContain('excluded folder /h/x')
+  })
 })
