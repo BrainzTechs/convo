@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { parseBeat } from '../hooks/live.ts'
 import { BLOB_CHARS, assembleCompaction, assembleTurn, inputSummary, numbered, refs, toBlocks, touchedFiles, turnDir, type Row, type SpoolItem } from '../hooks/turns.ts'
 
 const row = (door: string, uuid: string, blocks: Row['blocks']): Row => ({ door, uuid, type: door === 'response' ? 'assistant' : 'user', blocks })
@@ -108,16 +109,18 @@ describe('turn assembly', () => {
 })
 
 /** Stands in for Claude Code: git answers as present, files land in a map. */
-function world(on: On, files: Map<string, string>, commands: string[][]): void {
+function world(on: On, files: Map<string, string>, commands: string[][], opts: { failAlive?: boolean } = {}): void {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess1234-0000-0000-0000-000000000000' }))
   on('session.messages', () => ({ value: [] }))
+  on('session.end', () => ({ sessionId: 'sess1234-0000-0000-0000-000000000000' }))
   on('process.run', ($, e) => {
     commands.push([...e.argv])
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.exists', ($, e) => ({ value: files.has(e.path) || e.path.endsWith('/HEAD') }))
   on('fs.write', ($, e) => {
+    if (opts.failAlive && e.path.includes('/alive/')) throw new Error('disk full')
     files.set(e.path, e.text)
     return { value: undefined }
   })
@@ -152,5 +155,54 @@ describe('hooks', () => {
     expect(item.files.at(0)?.text).toContain('rows: ["r1"]')
     expect(item.rows).toEqual(['r1'])
     expect(item.transcript?.endsWith('/sess1234-0000-0000-0000-000000000000.jsonl')).toBe(true)
+  })
+
+  const ALIVE = '/h/.claude/convo/-proj/alive/sess1234-0000-0000-0000-000000000000'
+  const beatOf = (files: Map<string, string>): ReturnType<typeof parseBeat> => parseBeat(files.get(ALIVE) ?? '')
+  const done = { turnId: 'turn0001-x', answer: 'Hi!', reason: 'answer', durationMs: 5, isAborted: false } as const
+
+  test('the heartbeat says what the chat is doing', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    expect(beatOf(files)).toMatchObject({ v: 1, state: 'idle', interactive: false, holds: [], holdsUnknown: 0 })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'migrate payments repo to sqlc' })
+    expect(beatOf(files)).toMatchObject({ state: 'working', prompt: 'migrate payments repo to sqlc', interactive: false })
+    await $.turn.complete(done)
+    expect(beatOf(files)?.state).toBe('idle')
+    await $.session.end({ reason: 'exit' } as never)
+    expect(beatOf(files)?.state).toBe('ended')
+  })
+
+  test('the prompt in the heartbeat is masked and cut to 120 characters', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'use sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV' })
+    expect(files.get(ALIVE)).not.toContain('ABCDEFGHIJKLMNOPQRSTUV')
+    await $.turn.start({ turnId: 'turn0002-x', text: 'x'.repeat(500) })
+    expect(beatOf(files)?.prompt).toBe('x'.repeat(120))
+  })
+
+  test('a heartbeat that cannot be written leaves the turn alone', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [], { failAlive: true })
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'hello' })
+    const r = await $.turn.complete(done)
+    expect(r).toEqual({ text: '' })
+    expect(files.has(ALIVE)).toBe(false) // the write really did fail
+    expect([...files.keys()].some(p => p.startsWith('/h/.claude/convo/-proj/spool/sess1234'))).toBe(true)
+  })
+
+  test('a worktree subagent counts as an unknown hold while it runs', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await $.agent.spawn({ tool_use_id: 't1', prompt: 'p', description: 'd', subagentType: 'general-purpose', isolation: 'worktree' } as never)
+    expect(beatOf(files)?.holdsUnknown).toBe(1)
+    await $.turn.complete({ ...done, turnId: 'turn0002-x', agentId: 'ag1' } as never)
+    expect(beatOf(files)?.holdsUnknown).toBe(0)
   })
 })

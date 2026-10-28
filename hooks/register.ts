@@ -22,7 +22,7 @@ import type { EngineInterface, Register, RenderElement } from 'claude-code'
 import type { Io } from './io.ts'
 import { messageTokens, tailStart, tokensOf, turnStarts } from './checkpoint.ts'
 import { KEPT_DOORS, assembleTurn, refs, toBlocks, turnDir, type Row } from './turns.ts'
-import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, resume, resumed, startText } from './state.ts'
+import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, resume, resumed, startText, worktreeAgents } from './state.ts'
 import { transcriptOf, transcripts } from './rows.ts'
 import { ensureRepo, projectRoot } from './repo.ts'
 import { adoptOrphans, enqueue, flush, heartbeat } from './spool.ts'
@@ -153,6 +153,24 @@ let statusBase: string | undefined
 let statusShown: string | undefined
 
 const isLive = (a: ConvoAgent): boolean => a.status === 'running' || a.status === 'waiting'
+
+/** Worktree subagents still running: where they edit is unknown, so the heartbeat only counts them. */
+const worktreesRunning = (): number => [...worktreeAgents].filter(id => { const a = runs.get(id); return a !== undefined && isLive(a) }).length
+
+/** The project folder this chat works in when it is not where it started (a worktree it moved into); none when it is the same. */
+async function holdsOf($: EngineInterface): Promise<string[]> {
+  try {
+    const root = await $.session.root()
+    return root && root !== S.cwd ? [root] : []
+  } catch {
+    return []
+  }
+}
+
+/** The heartbeat in the background: a chat's state change never waits on a file write. */
+function beatNow(io: Io): void {
+  void heartbeat(io).catch(() => undefined)
+}
 
 function setRun(a: ConvoAgent): void {
   runs.set(a.id, a)
@@ -703,6 +721,7 @@ export const register: Register = (on, options) => {
     }
     const io = ioOf($)
     ioOfStatic = io
+    S.beat = { v: 1, state: 'idle', since: Date.now(), interactive: e.isInteractive, holds: [], holdsUnknown: 0 }
     const kept = await $.store.get('tool-sizes')
     if (kept && typeof kept === 'object' && !Object.keys(toolSizes).length) toolSizes = kept as Record<string, number>
     if (toolSizes.ToolSearch !== undefined) toolSearchSeen = true
@@ -837,6 +856,8 @@ export const register: Register = (on, options) => {
     if (!S.active) return next(e)
     // Another session takes this one's place: a resume. Anything else (a /clear) is no resume
     resume.pending = e.reason === 'resume'
+    S.beat = { ...S.beat, state: 'ended', since: Date.now() }
+    beatNow(ioOf($))
     try {
       await flush(ioOf($))
     } catch {
@@ -1064,6 +1085,12 @@ export const register: Register = (on, options) => {
         // Following never gets in the way of the agent
       }
     }
+    // The spawn's own `isolation` (the engine's types for this event do not list it yet)
+    if (r.agentId && (e as { isolation?: string }).isolation === 'worktree') {
+      worktreeAgents.add(r.agentId)
+      S.beat = { ...S.beat, holdsUnknown: worktreesRunning() }
+      beatNow(ioOf($))
+    }
     if (r.agentId) {
       agentsByToolUse.set(e.tool_use_id, r.agentId)
       agentSession.set(r.agentId, S.sid)
@@ -1116,6 +1143,10 @@ export const register: Register = (on, options) => {
     // A changed session id means /clear, /branch, a fork or a rewind: a new branch
     await useSession(ioOf($), await $.session.id())
     startText.set(e.turnId, e.text)
+    if (!e.agentId) {
+      S.beat = { ...S.beat, state: 'working', since: Date.now(), prompt: mask(e.text).slice(0, 120), turns: turnNow, holds: await holdsOf($), holdsUnknown: worktreesRunning() }
+      beatNow(ioOf($))
+    }
     try {
       // prompt.submit already looked for this turn; a delivered turn (a notification) had none
       if (Date.now() - S.submittedAt > 10_000) await noticeCompaction(ioOf($))
@@ -1132,6 +1163,15 @@ export const register: Register = (on, options) => {
     const run = e.agentId ? runs.get(e.agentId) : undefined
     if (run) await refreshRate($)
     if (run) endRun($, run, e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.reason === 'aborted' ? 'killed' : 'done', e.reason === 'answer' ? e.answer : undefined)
+    // A subagent that ended no longer holds a worktree; the chat's own turn ending is idle
+    if (e.agentId && worktreeAgents.has(e.agentId)) {
+      S.beat = { ...S.beat, holdsUnknown: worktreesRunning() }
+      beatNow(ioOf($))
+    }
+    if (!e.agentId) {
+      S.beat = { ...S.beat, state: 'idle', since: Date.now(), holds: await holdsOf($), holdsUnknown: worktreesRunning() }
+      beatNow(ioOf($))
+    }
     try {
       const agentId = e.agentId
       const rows = agentId ? (agentRows.get(agentId) ?? []) : S.mainRows

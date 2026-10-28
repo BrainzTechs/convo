@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { decideActive, isInside, parseExclude } from '../hooks/live.ts'
+import { beatText, decideActive, isInside, parseBeat, parseExclude, type Beat } from '../hooks/live.ts'
 
 describe('the off switch', () => {
   test('parseExclude cleans paths', () => {
@@ -25,5 +25,19 @@ describe('the off switch', () => {
     expect(decideActive({ ...base, exclude: ['/a/momo'] }).active).toBe(true) // prefix trap
     expect(decideActive({ ...base, isInteractive: false }).why).toContain('not interactive')
     expect(decideActive({ ...base, exclude: ['/a/momopay'] }).why).toBe('excluded folder /a/momopay')
+  })
+})
+
+describe('the heartbeat file', () => {
+  test('parseBeat rejects what is not a v1 beat', () => {
+    expect(parseBeat('1792913206856')).toBeUndefined() // the old bare timestamp
+    expect(parseBeat('')).toBeUndefined()
+    expect(parseBeat('{')).toBeUndefined()
+    expect(parseBeat('{"v":2}')).toBeUndefined()
+  })
+
+  test('a beat round-trips', () => {
+    const b: Beat = { v: 1, at: 1792913206856, state: 'working', since: 1792913200000, prompt: 'migrate payments repo to sqlc', turns: 4, interactive: true, holds: ['/a/b'], holdsUnknown: 1 }
+    expect(parseBeat(beatText(b))).toEqual(b)
   })
 })

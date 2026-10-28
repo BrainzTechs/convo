@@ -40,3 +40,29 @@ export function decideActive(o: {
   if (!o.isInteractive && o.force !== '1') return { active: false, why: 'not interactive' }
   return { active: true, why: '' }
 }
+
+/** What a chat's heartbeat file says: that it is alive, and what it is doing. */
+export type Beat = {
+  v: 1
+  at: number
+  state: 'working' | 'idle' | 'ended'
+  since: number
+  prompt?: string
+  turns?: number
+  interactive?: boolean
+  holds?: string[]
+  holdsUnknown?: number
+}
+
+/** A heartbeat file's text as a beat; `undefined` for the old bare timestamp, anything that is not JSON, or another version. */
+export function parseBeat(text: string): Beat | undefined {
+  try {
+    const b: unknown = JSON.parse(text)
+    if (typeof b !== 'object' || b === null || (b as { v?: unknown }).v !== 1) return undefined
+    return b as Beat
+  } catch {
+    return undefined
+  }
+}
+
+export const beatText = (b: Beat): string => JSON.stringify(b)

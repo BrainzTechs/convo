@@ -4,6 +4,7 @@
 // `let` cannot be assigned from outside its module). Maps and sets that are
 // only ever changed in place live beside it.
 
+import type { Beat } from './live.ts'
 import type { Row } from './turns.ts'
 
 export const S = {
@@ -52,6 +53,9 @@ export const S = {
   /** The session's permission mode as the last prompt's hooks saw it ('' before one). */
   permissionMode: '',
 
+  /** What the heartbeat file says about this chat (the time it was written is added then). */
+  beat: { v: 1, state: 'idle', since: 0 } as Omit<Beat, 'at'>,
+
   /** Goes up whenever this process moves the history (a commit, a merge, a session switch): the pane redraws on it. */
   moved: 0,
 
@@ -59,6 +63,8 @@ export const S = {
   compactedAt: undefined as number | undefined,
 }
 
+/** Subagents spawned with their own git worktree: where they edit is unknown, so they only count as holds. */
+export const worktreeAgents = new Set<string>()
 /** Running subagents' rows, each until its turn ends. */
 export const agentRows = new Map<string, Row[]>()
 /** tool_use id → subagent id. */

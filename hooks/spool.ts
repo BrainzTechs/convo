@@ -3,6 +3,7 @@
 import type { Io } from './io.ts'
 import type { SpoolItem } from './turns.ts'
 import { S } from './state.ts'
+import { beatText } from './live.ts'
 import { git, utf8 } from './git.ts'
 import { commitItem } from './commit.ts'
 
@@ -108,9 +109,9 @@ export async function flushAll(io: Io): Promise<void> {
 /** A session that has written no heartbeat for this long is gone: its spool may be adopted. */
 export const GONE_MS = 180_000
 
-/** Marks this session as alive, so no other session adopts its spool while it sits idle. */
+/** Marks this session as alive, so no other session adopts its spool while it sits idle, and says what it is doing. */
 export async function heartbeat(io: Io): Promise<void> {
-  if (S.gitOk && S.sid) await io.fs.write(`${S.root}/alive/${S.sid}`, String(Date.now()))
+  if (S.gitOk && S.sid) await io.fs.write(`${S.root}/alive/${S.sid}`, beatText({ ...S.beat, at: Date.now() }))
 }
 
 /** Whether a session has shown a heartbeat lately. */
