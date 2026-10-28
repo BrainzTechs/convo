@@ -22,7 +22,7 @@ import type { EngineInterface, Register, RenderElement } from 'claude-code'
 import type { Io } from './io.ts'
 import { messageTokens, tailStart, tokensOf, turnStarts } from './checkpoint.ts'
 import { KEPT_DOORS, assembleTurn, refs, toBlocks, turnDir, type Row } from './turns.ts'
-import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, resume, resumed, startText, worktreeAgents } from './state.ts'
+import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, resume, resumed, startText, agentCwds, worktreeAgents } from './state.ts'
 import { transcriptOf, transcripts } from './rows.ts'
 import { ensureRepo, projectRoot } from './repo.ts'
 import { adoptOrphans, enqueue, flush, heartbeat } from './spool.ts'
@@ -154,16 +154,24 @@ let statusShown: string | undefined
 
 const isLive = (a: ConvoAgent): boolean => a.status === 'running' || a.status === 'waiting'
 
-/** Worktree subagents still running: where they edit is unknown, so the heartbeat only counts them. */
-const worktreesRunning = (): number => [...worktreeAgents].filter(id => { const a = runs.get(id); return a !== undefined && isLive(a) }).length
+const liveRun = (id: string): boolean => {
+  const a = runs.get(id)
+  return a !== undefined && isLive(a)
+}
+
+/** Worktree subagents still running whose folder is not known: the heartbeat only counts them. One given a folder is a hold instead. */
+const worktreesRunning = (): number => [...worktreeAgents].filter(id => !agentCwds.has(id) && liveRun(id)).length
+
+/** The folders running subagents were told to work in. */
+const agentFolders = (): string[] => [...agentCwds].filter(([id]) => liveRun(id)).map(([, dir]) => dir)
 
 /** The project folder this chat works in when it is not where it started (a worktree it moved into); none when it is the same. */
 async function holdsOf($: EngineInterface): Promise<string[]> {
   try {
     const root = await $.session.root()
-    return root && root !== S.cwd ? [root] : []
+    return [...new Set([...(root && root !== S.cwd ? [root] : []), ...agentFolders()])]
   } catch {
-    return []
+    return agentFolders()
   }
 }
 
@@ -1085,11 +1093,21 @@ export const register: Register = (on, options) => {
         // Following never gets in the way of the agent
       }
     }
-    // The spawn's own `isolation` (the engine's types for this event do not list it yet)
-    if (r.agentId && (e as { isolation?: string }).isolation === 'worktree') {
-      worktreeAgents.add(r.agentId)
-      S.beat = { ...S.beat, holdsUnknown: worktreesRunning() }
-      beatNow(ioOf($))
+    // Where the subagent works, for the heartbeat: the folder the call set, or (its own worktree) a folder not known
+    if (r.agentId && !e.isTeammate) {
+      try {
+        const rows = e.parentAgentId ? (agentRows.get(e.parentAgentId) ?? []) : S.mainRows
+        const call = rows.flatMap(x => x.blocks).find(b => b.type === 'tool_use' && b.id === e.tool_use_id)
+        const input = call?.type === 'tool_use' ? (call.input as { isolation?: unknown } | null | undefined) : undefined
+        if (input?.isolation === 'worktree') worktreeAgents.add(r.agentId)
+        if (e.cwd) agentCwds.set(r.agentId, e.cwd)
+        if (worktreeAgents.has(r.agentId) || e.cwd) {
+          S.beat = { ...S.beat, holds: await holdsOf($), holdsUnknown: worktreesRunning() }
+          beatNow(ioOf($))
+        }
+      } catch {
+        // Following never gets in the way of the agent
+      }
     }
     if (r.agentId) {
       agentsByToolUse.set(e.tool_use_id, r.agentId)
@@ -1164,8 +1182,8 @@ export const register: Register = (on, options) => {
     if (run) await refreshRate($)
     if (run) endRun($, run, e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.reason === 'aborted' ? 'killed' : 'done', e.reason === 'answer' ? e.answer : undefined)
     // A subagent that ended no longer holds a worktree; the chat's own turn ending is idle
-    if (e.agentId && worktreeAgents.has(e.agentId)) {
-      S.beat = { ...S.beat, holdsUnknown: worktreesRunning() }
+    if (e.agentId && (worktreeAgents.has(e.agentId) || agentCwds.has(e.agentId))) {
+      S.beat = { ...S.beat, holds: await holdsOf($), holdsUnknown: worktreesRunning() }
       beatNow(ioOf($))
     }
     if (!e.agentId) {

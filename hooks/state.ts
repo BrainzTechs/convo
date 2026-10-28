@@ -63,8 +63,10 @@ export const S = {
   compactedAt: undefined as number | undefined,
 }
 
-/** Subagents spawned with their own git worktree: where they edit is unknown, so they only count as holds. */
+/** Subagents whose spawning call asked for a git worktree of their own: where they edit is unknown, so they only count as unknown holds. */
 export const worktreeAgents = new Set<string>()
+/** The directory a subagent was told to run in, by subagent id: a real hold while it runs. */
+export const agentCwds = new Map<string, string>()
 /** Running subagents' rows, each until its turn ends. */
 export const agentRows = new Map<string, Row[]>()
 /** tool_use id → subagent id. */

@@ -195,14 +195,42 @@ describe('hooks', () => {
     expect([...files.keys()].some(p => p.startsWith('/h/.claude/convo/-proj/spool/sess1234'))).toBe(true)
   })
 
+  /** The main turn's Agent tool call, as the engine appends it before the spawn. */
+  const agentCall = ($: { session: { append: (a: never) => Promise<unknown> } }, input: Record<string, unknown>): Promise<unknown> =>
+    $.session.append({ uuid: 'r1', door: 'response', origin: { kind: 'engine' }, message: { type: 'assistant', role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Agent', input }] } } as never)
+  const spawn = { tool_use_id: 't1', prompt: 'p', description: 'd', subagentType: 'general-purpose' }
+
   test('a worktree subagent counts as an unknown hold while it runs', async ($, on) => {
     const files = new Map<string, string>()
     world(on, files, [])
     await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
     await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
-    await $.agent.spawn({ tool_use_id: 't1', prompt: 'p', description: 'd', subagentType: 'general-purpose', isolation: 'worktree' } as never)
-    expect(beatOf(files)?.holdsUnknown).toBe(1)
+    await agentCall($, { prompt: 'p', isolation: 'worktree' })
+    await $.agent.spawn(spawn as never)
+    expect(beatOf(files)).toMatchObject({ holdsUnknown: 1, holds: [] })
     await $.turn.complete({ ...done, turnId: 'turn0002-x', agentId: 'ag1' } as never)
     expect(beatOf(files)?.holdsUnknown).toBe(0)
+  })
+
+  test('a spawn without worktree isolation holds nothing unknown', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await agentCall($, { prompt: 'p' })
+    await $.agent.spawn(spawn as never)
+    expect(beatOf(files)?.holdsUnknown).toBe(0)
+  })
+
+  test('a subagent given a folder holds it while it runs, and not as an unknown hold', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await agentCall($, { prompt: 'p', isolation: 'worktree' })
+    await $.agent.spawn({ ...spawn, cwd: '/proj/.claude/worktrees/agent-x' } as never)
+    expect(beatOf(files)).toMatchObject({ holds: ['/proj/.claude/worktrees/agent-x'], holdsUnknown: 0 })
+    await $.turn.complete({ ...done, turnId: 'turn0002-x', agentId: 'ag1' } as never)
+    expect(beatOf(files)).toMatchObject({ holds: [], holdsUnknown: 0 })
   })
 })
