@@ -1,6 +1,6 @@
 {
   "name": "convo",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "Keeps every Claude Code conversation as git history: one commit per turn, a branch per session and subagent, keyframes in place of compaction, merge and recall by asking, all local and redacted.",
   "author": {
     "name": "Brainztechs"
