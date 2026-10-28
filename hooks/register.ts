@@ -25,7 +25,7 @@ import { KEPT_DOORS, assembleTurn, refs, toBlocks, turnDir, type Row } from './t
 import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, resume, resumed, startText, agentCwds, worktreeAgents } from './state.ts'
 import { transcriptOf, transcripts } from './rows.ts'
 import { ensureRepo, projectRoot } from './repo.ts'
-import { adoptOrphans, enqueue, flush, heartbeat } from './spool.ts'
+import { adoptOrphans, endBeat, enqueue, flush, heartbeat } from './spool.ts'
 import { SUMMARY_OPENING, noticeCompaction, recordCompaction, rowsFor, useSession } from './session.ts'
 import { permit } from './permission.ts'
 import { REFRESH_TURNS, briefSource, buildCheckpoint, buildOwed, refreshRecords } from './keyframes.ts'
@@ -45,7 +45,7 @@ import { panelNodes, type Action, type PanelButton } from './panel.ts'
 import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
 import { withTrailers } from './lineage.ts'
-import { decideActive, parseExclude } from './live.ts'
+import { decideActive, parseExclude, type Beat } from './live.ts'
 import { collectLive, peersTool } from './peers.ts'
 
 /**
@@ -205,9 +205,24 @@ async function holdsOf($: EngineInterface): Promise<string[]> {
   }
 }
 
+/**
+ * What the heartbeat says now: the chat's state as the events left it, with its holds read fresh from the
+ * runs, so a subagent that started, came back or ended counts at the next write, an event or the timer's.
+ * The state is read after the await, so a turn that started meanwhile is never written over with an older one.
+ */
+async function freshBeat($: EngineInterface): Promise<Omit<Beat, 'at'>> {
+  const holds = await holdsOf($)
+  return { ...S.beat, holds, holdsUnknown: worktreesRunning() }
+}
+
+/** Writes the heartbeat as it stands now. */
+async function writeBeat($: EngineInterface): Promise<void> {
+  await heartbeat(ioOf($), await freshBeat($))
+}
+
 /** The heartbeat in the background: a chat's state change never waits on a file write. */
-function beatNow(io: Io): void {
-  void heartbeat(io).catch(() => undefined)
+function beatNow($: EngineInterface): void {
+  void writeBeat($).catch(() => undefined)
 }
 
 function setRun(a: ConvoAgent): void {
@@ -759,7 +774,7 @@ export const register: Register = (on, options) => {
     }
     const io = ioOf($)
     ioOfStatic = io
-    S.beat = { v: 1, state: 'idle', since: Date.now(), interactive: e.isInteractive, holds: [], holdsUnknown: 0 }
+    S.beat = { v: 1, state: 'idle', since: Date.now(), interactive: e.isInteractive }
     const kept = await $.store.get('tool-sizes')
     if (kept && typeof kept === 'object' && !Object.keys(toolSizes).length) toolSizes = kept as Record<string, number>
     if (toolSizes.ToolSearch !== undefined) toolSearchSeen = true
@@ -794,8 +809,13 @@ export const register: Register = (on, options) => {
       showStatus($, `history is off (${why})`)
     } else {
       $.clock.every(2000, () => flush(io))
-      await heartbeat(io)
-      $.clock.every(30_000, () => heartbeat(io))
+      // A heartbeat that cannot be written costs this chat its place in the Live tab, never the rest of its start
+      try {
+        await writeBeat($)
+      } catch (err) {
+        $.ui.log(`convo: no heartbeat written: ${String(err).slice(0, 200)}`, { to: 'debug' })
+      }
+      $.clock.every(30_000, () => writeBeat($).catch(() => undefined))
       $.clock.after(5000, () => adoptOrphans(io))
       $.clock.every(300_000, () => adoptOrphans(io))
       await registerTools(io)
@@ -899,8 +919,8 @@ export const register: Register = (on, options) => {
     if (!S.active) return next(e)
     // Another session takes this one's place: a resume. Anything else (a /clear) is no resume
     resume.pending = e.reason === 'resume'
-    S.beat = { ...S.beat, state: 'ended', since: Date.now() }
-    beatNow(ioOf($))
+    // The ending session's file says so; after a /clear or a resume the process goes on idle under another id
+    endBeat(ioOf($), typeof e.sessionId === 'string' && e.sessionId ? e.sessionId : S.sid)
     try {
       await flush(ioOf($))
     } catch {
@@ -1138,10 +1158,7 @@ export const register: Register = (on, options) => {
         const input = call?.type === 'tool_use' ? (call.input as { isolation?: unknown } | null | undefined) : undefined
         if (input?.isolation === 'worktree') worktreeAgents.add(r.agentId)
         if (e.cwd) agentCwds.set(r.agentId, e.cwd)
-        if (worktreeAgents.has(r.agentId) || e.cwd) {
-          S.beat = { ...S.beat, holds: await holdsOf($), holdsUnknown: worktreesRunning() }
-          beatNow(ioOf($))
-        }
+        if (worktreeAgents.has(r.agentId) || e.cwd) beatNow($)
       } catch {
         // Following never gets in the way of the agent
       }
@@ -1195,12 +1212,32 @@ export const register: Register = (on, options) => {
       const { ended: _e, warned: _w, merged: _m, ...rest } = back
       setRun({ ...rest, status: 'running', lastAt: Date.now() })
     }
+    // Where a subagent works, from inside its own loop: the only word on a worktree its definition asked for
+    const sub = (e as { readonly agentId?: string }).agentId
+    if (sub) {
+      try {
+        const cwd = await $.session.cwd()
+        if (cwd && cwd !== S.cwd) agentCwds.set(sub, cwd)
+      } catch {
+        // Not known: a worktree the spawning call asked for still counts as an unknown hold
+      }
+    }
     // A changed session id means /clear, /branch, a fork or a rewind: a new branch
     await useSession(ioOf($), await $.session.id())
     startText.set(e.turnId, e.text)
     if (!e.agentId) {
-      S.beat = { ...S.beat, state: 'working', since: Date.now(), prompt: mask(e.text).slice(0, 120), turns: turnNow, holds: await holdsOf($), holdsUnknown: worktreesRunning() }
-      beatNow(ioOf($))
+      let prompt = ''
+      try {
+        prompt = mask(e.text).slice(0, 120)
+      } catch {
+        // The prompt is left out; the chat still reads as working
+      }
+      const { prompt: _was, ...rest } = S.beat
+      S.beat = { ...rest, state: 'working', since: Date.now(), turns: turnNow, ...(prompt ? { prompt } : {}) }
+      beatNow($)
+    } else if (sub && runs.has(sub)) {
+      // A followed subagent's turn (a new one, or one a message brought back): its holds count again
+      beatNow($)
     }
     try {
       // prompt.submit already looked for this turn; a delivered turn (a notification) had none
@@ -1219,13 +1256,10 @@ export const register: Register = (on, options) => {
     if (run) await refreshRate($)
     if (run) endRun($, run, e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.reason === 'aborted' ? 'killed' : 'done', e.reason === 'answer' ? e.answer : undefined)
     // A subagent that ended no longer holds a worktree; the chat's own turn ending is idle
-    if (e.agentId && (worktreeAgents.has(e.agentId) || agentCwds.has(e.agentId))) {
-      S.beat = { ...S.beat, holds: await holdsOf($), holdsUnknown: worktreesRunning() }
-      beatNow(ioOf($))
-    }
+    if (e.agentId && (worktreeAgents.has(e.agentId) || agentCwds.has(e.agentId))) beatNow($)
     if (!e.agentId) {
-      S.beat = { ...S.beat, state: 'idle', since: Date.now(), holds: await holdsOf($), holdsUnknown: worktreesRunning() }
-      beatNow(ioOf($))
+      S.beat = { ...S.beat, state: 'idle', since: Date.now() }
+      beatNow($)
     }
     try {
       const agentId = e.agentId

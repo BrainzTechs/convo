@@ -83,6 +83,8 @@ export const agentBase = new Map<string, string[]>()
 export const lateAgents = new Map<string, string>()
 /** Sessions that went on from another conversation as a resume (`claude --resume`, /resume), not a fork: their first turn says "continued". */
 export const resumed = new Set<string>()
+/** Sessions this process ran and saw end (a /clear, a resume, a /branch, a fork, a rewind): their heartbeat file says `ended` and is not written again. */
+export const endedSessions = new Set<string>()
 /** A /resume was asked for (or a session ended for one): the next session switch is that resume. */
 export const resume = { pending: false }
 
