@@ -1228,14 +1228,19 @@ export const register: Register = (on, options) => {
     await useSession(ioOf($), await $.session.id())
     startText.set(e.turnId, e.text)
     if (!e.agentId) {
-      let prompt = ''
-      try {
-        prompt = mask(e.text).slice(0, 120)
-      } catch {
-        // The prompt is left out; the chat still reads as working
+      // A turn a task notification started is not the person's: the beat keeps the prompt they last typed
+      if (e.text.trimStart().startsWith('<task-notification>')) {
+        S.beat = { ...S.beat, state: 'working', since: Date.now(), turns: turnNow }
+      } else {
+        let prompt = ''
+        try {
+          prompt = mask(e.text).slice(0, 120)
+        } catch {
+          // The prompt is left out; the chat still reads as working
+        }
+        const { prompt: _was, ...rest } = S.beat
+        S.beat = { ...rest, state: 'working', since: Date.now(), turns: turnNow, ...(prompt ? { prompt } : {}) }
       }
-      const { prompt: _was, ...rest } = S.beat
-      S.beat = { ...rest, state: 'working', since: Date.now(), turns: turnNow, ...(prompt ? { prompt } : {}) }
       beatNow($)
     } else if (sub && runs.has(sub)) {
       // A followed subagent's turn (a new one, or one a message brought back): its holds count again

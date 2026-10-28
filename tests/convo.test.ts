@@ -212,6 +212,16 @@ describe('hooks', () => {
     expect(beatOf(files)?.prompt).toBe('x'.repeat(120))
   })
 
+  test('a turn a task notification started keeps the last prompt the person typed', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'migrate payments repo to sqlc' })
+    await $.turn.complete(done)
+    await $.turn.start({ turnId: 'turn0002-x', text: '<task-notification>\n<task-id>bgyu1f9l3</task-id>\n<status>completed</status>\n</task-notification>' })
+    expect(beatOf(files)).toMatchObject({ state: 'working', prompt: 'migrate payments repo to sqlc', turns: 2 })
+  })
+
   test('a heartbeat that cannot be written leaves the turn alone', async ($, on) => {
     const files = new Map<string, string>()
     const registered: string[] = []
