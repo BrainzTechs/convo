@@ -1,5 +1,9 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { parseBeat } from '../hooks/live.ts'
+
+// The runtime's timer, for letting fire-and-forget writes land (the type lib here has no DOM or Node)
+declare const setTimeout: (fn: (v?: unknown) => void, ms: number) => unknown
 import { BLOB_CHARS, assembleCompaction, assembleTurn, inputSummary, numbered, refs, toBlocks, touchedFiles, turnDir, type Row, type SpoolItem } from '../hooks/turns.ts'
 
 const row = (door: string, uuid: string, blocks: Row['blocks']): Row => ({ door, uuid, type: door === 'response' ? 'assistant' : 'user', blocks })
@@ -108,16 +112,39 @@ describe('turn assembly', () => {
 })
 
 /** Stands in for Claude Code: git answers as present, files land in a map. */
-function world(on: On, files: Map<string, string>, commands: string[][]): void {
+type WorldOpts = {
+  failAlive?: boolean
+  /** The session id the engine answers now (a /clear or a /branch changes it). */
+  sid?: () => string
+  /** What `$.session.cwd()` answers: a subagent's own folder, inside its loop. */
+  cwd?: () => string
+  /** What `$.session.root()` answers, possibly late. */
+  root?: () => string | Promise<string>
+  /** What `$.agent.list()` answers. */
+  agents?: () => { id: string; status: string }[]
+  /** The names of the tools convo registers. */
+  registered?: string[]
+}
+
+function world(on: On, files: Map<string, string>, commands: string[][], opts: WorldOpts = {}) {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'sess1234-0000-0000-0000-000000000000' }))
+  on('session.id', () => ({ value: opts.sid?.() ?? 'sess1234-0000-0000-0000-000000000000' }))
+  on('session.cwd', () => ({ value: opts.cwd?.() ?? '/proj' }))
+  on('session.root', async () => ({ value: (await opts.root?.()) ?? '/proj' }))
+  on('agent.list', () => ({ value: (opts.agents?.() ?? []) as never }))
+  on('tool.register', ($, e) => {
+    opts.registered?.push(e.name)
+    return { value: { tool: `mcp__convo__${e.name}` } }
+  })
   on('session.messages', () => ({ value: [] }))
+  on('session.end', () => ({ sessionId: 'sess1234-0000-0000-0000-000000000000' }))
   on('process.run', ($, e) => {
     commands.push([...e.argv])
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.exists', ($, e) => ({ value: files.has(e.path) || e.path.endsWith('/HEAD') }))
   on('fs.write', ($, e) => {
+    if (opts.failAlive && e.path.includes('/alive/')) throw new Error('disk full')
     files.set(e.path, e.text)
     return { value: undefined }
   })
@@ -126,8 +153,8 @@ function world(on: On, files: Map<string, string>, commands: string[][]): void {
   on('turn.start', ($, e) => e)
   on('turn.complete', () => ({ text: '' }))
   mock.store(on)
-  mock.env(on, { HOME: '/h' })
-  mock.clock(on)
+  mock.env(on, { HOME: '/h', CONVO_FORCE: '1' })
+  return mock.clock(on)
 }
 
 describe('hooks', () => {
@@ -152,5 +179,223 @@ describe('hooks', () => {
     expect(item.files.at(0)?.text).toContain('rows: ["r1"]')
     expect(item.rows).toEqual(['r1'])
     expect(item.transcript?.endsWith('/sess1234-0000-0000-0000-000000000000.jsonl')).toBe(true)
+  })
+
+  /** Lets fire-and-forget beat writes land. */
+  const drain = async (): Promise<void> => {
+    for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0))
+  }
+  const ALIVE = '/h/.claude/convo/-proj/alive/sess1234-0000-0000-0000-000000000000'
+  const beatOf = (files: Map<string, string>): ReturnType<typeof parseBeat> => parseBeat(files.get(ALIVE) ?? '')
+  const done = { turnId: 'turn0001-x', answer: 'Hi!', reason: 'answer', durationMs: 5, isAborted: false } as const
+
+  test('the heartbeat says what the chat is doing', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    expect(beatOf(files)).toMatchObject({ v: 1, state: 'idle', interactive: false, holds: [], holdsUnknown: 0 })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'migrate payments repo to sqlc' })
+    expect(beatOf(files)).toMatchObject({ state: 'working', prompt: 'migrate payments repo to sqlc', interactive: false })
+    await $.turn.complete(done)
+    expect(beatOf(files)?.state).toBe('idle')
+    await $.session.end({ reason: 'exit' } as never)
+    expect(beatOf(files)?.state).toBe('ended')
+  })
+
+  test('the prompt in the heartbeat is masked and cut to 120 characters', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'use sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV' })
+    expect(files.get(ALIVE)).not.toContain('ABCDEFGHIJKLMNOPQRSTUV')
+    await $.turn.start({ turnId: 'turn0002-x', text: 'x'.repeat(500) })
+    expect(beatOf(files)?.prompt).toBe('x'.repeat(120))
+  })
+
+  test('a turn a task notification started keeps the last prompt the person typed', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'migrate payments repo to sqlc' })
+    await $.turn.complete(done)
+    await $.turn.start({ turnId: 'turn0002-x', text: '<task-notification>\n<task-id>bgyu1f9l3</task-id>\n<status>completed</status>\n</task-notification>' })
+    expect(beatOf(files)).toMatchObject({ state: 'working', prompt: 'migrate payments repo to sqlc', turns: 2 })
+  })
+
+  test('a heartbeat that cannot be written leaves the turn alone', async ($, on) => {
+    const files = new Map<string, string>()
+    const registered: string[] = []
+    world(on, files, [], { failAlive: true, registered })
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    // The rest of session.start ran past the failed first write: convo's tools are there
+    expect(registered).toContain('peers')
+    await $.turn.start({ turnId: 'turn0001-x', text: 'hello' })
+    const r = await $.turn.complete(done)
+    expect(r).toEqual({ text: '' })
+    expect(files.has(ALIVE)).toBe(false) // the write really did fail
+    expect([...files.keys()].some(p => p.startsWith('/h/.claude/convo/-proj/spool/sess1234'))).toBe(true)
+  })
+
+  /** The main turn's Agent tool call, as the engine appends it before the spawn. */
+  const agentCall = ($: { session: { append: (a: never) => Promise<unknown> } }, input: Record<string, unknown>): Promise<unknown> =>
+    $.session.append({ uuid: 'r1', door: 'response', origin: { kind: 'engine' }, message: { type: 'assistant', role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Agent', input }] } } as never)
+  const spawn = { tool_use_id: 't1', prompt: 'p', description: 'd', subagentType: 'general-purpose' }
+
+  test('a worktree subagent counts as an unknown hold while it runs', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await agentCall($, { prompt: 'p', isolation: 'worktree' })
+    await $.agent.spawn(spawn as never)
+    await drain()
+    expect(beatOf(files)).toMatchObject({ holdsUnknown: 1, holds: [] })
+    await $.turn.complete({ ...done, turnId: 'turn0002-x', agentId: 'ag1' } as never)
+    await drain()
+    expect(beatOf(files)?.holdsUnknown).toBe(0)
+  })
+
+  test('a spawn without worktree isolation holds nothing unknown', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await agentCall($, { prompt: 'p' })
+    await $.agent.spawn(spawn as never)
+    expect(beatOf(files)?.holdsUnknown).toBe(0)
+  })
+
+  test('a subagent given a folder holds it while it runs, and not as an unknown hold', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await agentCall($, { prompt: 'p', isolation: 'worktree' })
+    await $.agent.spawn({ ...spawn, cwd: '/proj/.claude/worktrees/agent-x' } as never)
+    await drain()
+    expect(beatOf(files)).toMatchObject({ holds: ['/proj/.claude/worktrees/agent-x'], holdsUnknown: 0 })
+    await $.turn.complete({ ...done, turnId: 'turn0002-x', agentId: 'ag1' } as never)
+    await drain()
+    expect(beatOf(files)).toMatchObject({ holds: [], holdsUnknown: 0 })
+  })
+
+  const OLD = 'sess1234-0000-0000-0000-000000000000'
+  const NEW = 'next5678-0000-0000-0000-000000000000'
+  const aliveOf = (sid: string): string => `/h/.claude/convo/-proj/alive/${sid}`
+  const beatAt = (files: Map<string, string>, sid: string): ReturnType<typeof parseBeat> => parseBeat(files.get(aliveOf(sid)) ?? '')
+
+  test('after /clear the process goes on idle under its new id; the old id says ended', async ($, on) => {
+    const files = new Map<string, string>()
+    let sid = OLD
+    const clock = world(on, files, [], { sid: () => sid })
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'migrate payments repo to sqlc' })
+    await drain()
+    expect(beatAt(files, OLD)?.state).toBe('working')
+    await $.session.end({ reason: 'clear', sessionId: OLD } as never)
+    sid = NEW
+    await clock.advance(30_000)
+    await drain()
+    const now = beatAt(files, NEW)
+    expect(now?.state).toBe('idle')
+    expect(now?.prompt).toBeUndefined()
+    expect(beatAt(files, OLD)?.state).toBe('ended')
+  })
+
+  test('a /branch, fork or rewind (a new id, no session.end) leaves the old id ended, so the chat never sees itself', async ($, on) => {
+    const files = new Map<string, string>()
+    let sid = OLD
+    world(on, files, [], { sid: () => sid })
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'first' })
+    await $.turn.complete(done)
+    sid = NEW
+    await $.turn.start({ turnId: 'turn0002-x', text: 'on the branch' })
+    await drain()
+    expect(beatAt(files, OLD)?.state).toBe('ended')
+    expect(beatAt(files, NEW)).toMatchObject({ state: 'working', prompt: 'on the branch' })
+  })
+
+  test('a subagent whose own turn.start finds it in a worktree holds that worktree, whatever its spawn said', async ($, on) => {
+    const files = new Map<string, string>()
+    let cwd = '/proj'
+    world(on, files, [], { cwd: () => cwd })
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    // Isolation set by the agent's definition: nothing on the call says so
+    await agentCall($, { prompt: 'p' })
+    await $.agent.spawn(spawn as never)
+    await drain()
+    expect(beatOf(files)).toMatchObject({ holds: [], holdsUnknown: 0 })
+    cwd = '/proj/.claude/worktrees/agent-x'
+    await $.turn.start({ turnId: 'turn0002-x', text: 'p', agentId: 'ag1' } as never)
+    await drain()
+    expect(beatOf(files)).toMatchObject({ holds: ['/proj/.claude/worktrees/agent-x'], holdsUnknown: 0 })
+    await $.turn.complete({ ...done, turnId: 'turn0002-x', agentId: 'ag1' } as never)
+    await drain()
+    expect(beatOf(files)).toMatchObject({ holds: [], holdsUnknown: 0 })
+  })
+
+  test('a finished worktree subagent a message brings back counts again', async ($, on) => {
+    const files = new Map<string, string>()
+    world(on, files, [])
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await agentCall($, { prompt: 'p', isolation: 'worktree' })
+    await $.agent.spawn(spawn as never)
+    await $.turn.complete({ ...done, turnId: 'turn0002-x', agentId: 'ag1' } as never)
+    await drain()
+    expect(beatOf(files)?.holdsUnknown).toBe(0)
+    await $.turn.start({ turnId: 'turn0003-x', text: 'one more thing', agentId: 'ag1' } as never)
+    await drain()
+    expect(beatOf(files)?.holdsUnknown).toBe(1)
+  })
+
+  test('the 30 s heartbeat reads the holds fresh: a subagent the engine says has ended stops holding with no event of convo\'s', async ($, on) => {
+    const files = new Map<string, string>()
+    let agents: { id: string; status: string }[] = [{ id: 'ag1', status: 'running' }]
+    const clock = world(on, files, [], { agents: () => agents })
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await agentCall($, { prompt: 'p', isolation: 'worktree' })
+    await $.agent.spawn(spawn as never)
+    await drain()
+    expect(beatOf(files)?.holdsUnknown).toBe(1)
+    agents = [{ id: 'ag1', status: 'completed' }]
+    await clock.advance(30_000)
+    await drain()
+    expect(beatOf(files)?.holdsUnknown).toBe(0)
+    expect(beatOf(files)?.state).toBe('working')
+  })
+
+  test('a main turn that starts while a subagent\'s end still reads the session root ends as working', async ($, on) => {
+    const files = new Map<string, string>()
+    let gateNext = false
+    let release: (() => void) | undefined
+    world(on, files, [], {
+      root: () => {
+        if (!gateNext) return '/proj'
+        gateNext = false
+        return new Promise<string>(r => {
+          release = () => r('/proj')
+        })
+      },
+    })
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await $.turn.start({ turnId: 'turn0001-x', text: 'go' })
+    await agentCall($, { prompt: 'p', isolation: 'worktree' })
+    await $.agent.spawn({ ...spawn, background: true } as never)
+    await $.turn.complete(done)
+    await drain()
+    expect(beatOf(files)?.state).toBe('idle')
+    gateNext = true
+    const sub = $.turn.complete({ ...done, turnId: 'turn0002-x', agentId: 'ag1' } as never)
+    for (let i = 0; i < 200 && !release; i++) await new Promise(r => setTimeout(r, 0))
+    expect(release).toBeDefined()
+    await $.turn.start({ turnId: 'turn0003-x', text: 'next thing' })
+    release?.()
+    await sub
+    await drain()
+    expect(beatOf(files)).toMatchObject({ state: 'working', prompt: 'next thing', holdsUnknown: 0 })
   })
 })

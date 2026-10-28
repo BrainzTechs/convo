@@ -45,7 +45,7 @@ function world(on: On, opts: { model: 'ok' | 'fails' }, log: { commits: string[]
   on('ui.status', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   mock.store(on)
-  mock.env(on, { HOME: '/h' })
+  mock.env(on, { HOME: '/h', CONVO_FORCE: '1' })
   mock.clock(on)
 }
 

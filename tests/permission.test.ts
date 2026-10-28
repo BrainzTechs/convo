@@ -14,7 +14,7 @@ function world(on: On, opts: { verdict: Verdict; answer?: string }, log: { asked
   on('fs.list', () => ({ value: [] }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__convo__${e.name}` } }))
   // The engine's own decision (rules, mode), beneath convo
-  on('tool.check', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge'] }, () => opts.verdict)
+  on('tool.check', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__peers'] }, () => opts.verdict)
   // $.ui.ask is a call of AskUserQuestion: the person picks a label, or nobody is there (a -p run)
   on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
     const q = (e as unknown as { questions: { question: string }[] }).questions[0]?.question ?? ''
@@ -28,7 +28,7 @@ function world(on: On, opts: { verdict: Verdict; answer?: string }, log: { asked
   })
   on('ui.status', () => ({ value: undefined }))
   mock.store(on)
-  mock.env(on, { HOME: '/h' })
+  mock.env(on, { HOME: '/h', CONVO_FORCE: '1' })
   mock.clock(on)
 }
 
@@ -100,5 +100,24 @@ describe('permission for convo tools', () => {
     const r = await $.tool.call({ tool: 'mcp__convo__merge', branch: 'x' })
     expect('deny' in r ? r.deny : '').toBe('Not allowed: denied by rule mcp__convo__merge')
     expect(log.asked).toEqual([])
+  })
+
+  test('the peers tool asks the person even with no branch to read, and "don\'t allow" refuses', async ($, on) => {
+    const log = { asked: [] as string[], debug: [] as string[] }
+    world(on, { verdict: { decision: 'ask' }, answer: "Don't allow" }, log)
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    const r = await $.tool.call({ tool: 'mcp__convo__peers' })
+    expect('deny' in r ? r.deny : '').toBe('The person declined this.')
+    expect(log.asked).toEqual(['Let Claude see what the other chats running in this folder are doing?'])
+  })
+
+  test('the peers tool runs on a yes, and "allow this session" asks once', async ($, on) => {
+    const log = { asked: [] as string[], debug: [] as string[] }
+    world(on, { verdict: { decision: 'ask' }, answer: 'Allow this session' }, log)
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    const r = await $.tool.call({ tool: 'mcp__convo__peers', chat: 'backend' })
+    expect('deny' in r && r.deny).toBeFalsy()
+    await $.tool.call({ tool: 'mcp__convo__peers' })
+    expect(log.asked.length).toBe(1)
   })
 })

@@ -56,7 +56,13 @@ export type ConvoEntry = {
 export type ConvoDetail = { asked: string; answer: string; tools: string[]; files: string[] }
 
 /** The pane's own state: the tab, and the turn (or `agent:<id>`) open in it, with a turn's detail. */
-export type ConvoUi = { tab: 'history' | 'context' | 'lines' | 'agents'; open?: string; detail?: ConvoDetail }
+export type ConvoUi = { tab: 'history' | 'context' | 'lines' | 'agents' | 'live'; open?: string; detail?: ConvoDetail }
+
+/** Another chat running inside this chat's folder, as the Live tab shows it. `name` is its folder from this one's; `unknown` is a chat with no beat yet (an older convo); `failed` when its history could not be read (git failed), not merely empty. */
+export type ConvoLivePeer = { sid: string; name: string; state: 'working' | 'idle' | 'unknown'; since: number; prompt?: string; subjects: string[]; failed?: true }
+
+/** The Live tab: the other live chats here, working ones first, how many work now, the chats convo does not record, and when this was read. */
+export type ConvoLive = { peers: ConvoLivePeer[]; unseen: number; working: number; at: number }
 
 /** A subagent of this session, as the Agents tab shows it: live while it runs, kept a while after. */
 export type ConvoAgent = {
@@ -202,6 +208,7 @@ declare module 'claude-code' {
   interface PluginState {
     /** held: the built-in tools convo held back behind ToolSearch in this process, by name, with their descriptions' length. */
     /** agents: this session's subagents, live and recently finished. */
-    convo: { view: ConvoView; ledger: ConvoLedger; ui: ConvoUi; held: Record<string, number>; agents: ConvoAgent[] }
+    /** live: the other chats running inside this folder, for the Live tab. */
+    convo: { view: ConvoView; ledger: ConvoLedger; ui: ConvoUi; held: Record<string, number>; agents: ConvoAgent[]; live: ConvoLive }
   }
 }

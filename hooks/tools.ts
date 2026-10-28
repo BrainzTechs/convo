@@ -292,6 +292,13 @@ export async function registerTools(io: Io): Promise<void> {
       description: "Open convo's pane beside the chat: this conversation's turns, the keyframe Claude works from, open questions, and its forks, rewinds, merges and subagents. Use it when the person asks to see convo, its pane, or the conversation's branches at a glance.",
       inputSchema: { type: 'object', properties: {} },
     },
+    {
+      key: 'peers' as const,
+      isDeferred: true,
+      description:
+        'List the other Claude Code chats running inside this folder right now (subfolders and worktrees included): where each runs, whether it is working or idle, what it is on, its last turns and the files it touched, and which folders are in use. With chat (a folder or session id prefix) it reads that chat\'s last turns in full. Use it when the person asks what other chats are doing, what is left across the work, or whether a folder or worktree can be removed.',
+      inputSchema: { type: 'object', properties: { chat: { type: 'string', description: 'A chat\'s folder (as the list names it) or session id prefix, to read its last turns in full' }, turns: { type: 'number', description: 'How many of its last turns to read with chat, default 5, at most 20' } } },
+    },
   ]
   for (const { key, ...spec } of specs) {
     try {

@@ -2,7 +2,8 @@
 
 import type { Io } from './io.ts'
 import type { SpoolItem } from './turns.ts'
-import { S } from './state.ts'
+import { S, endedSessions } from './state.ts'
+import { beatText, GONE_MS, type Beat } from './live.ts'
 import { git, utf8 } from './git.ts'
 import { commitItem } from './commit.ts'
 
@@ -105,12 +106,34 @@ export async function flushAll(io: Io): Promise<void> {
   await flush(io)
 }
 
-/** A session that has written no heartbeat for this long is gone: its spool may be adopted. */
-export const GONE_MS = 180_000
+// A session that has written no heartbeat for this long is gone: its spool may be adopted (the number lives in live.ts, which has no imports)
+export { GONE_MS }
 
-/** Marks this session as alive, so no other session adopts its spool while it sits idle. */
-export async function heartbeat(io: Io): Promise<void> {
-  if (S.gitOk && S.sid) await io.fs.write(`${S.root}/alive/${S.sid}`, String(Date.now()))
+/**
+ * Marks this session as alive, so no other session adopts its spool while it sits idle, and says what it is
+ * doing: `beat`, which the hooks build with the holds read fresh. A session that has ended keeps its `ended`.
+ */
+export async function heartbeat(io: Io, beat: Omit<Beat, 'at'> = S.beat): Promise<void> {
+  if (S.gitOk && S.sid && !endedSessions.has(S.sid)) await io.fs.write(`${S.root}/alive/${S.sid}`, beatText({ ...beat, at: Date.now() }))
+}
+
+/**
+ * A session this process no longer runs (it ended, or the process moved on to another id): its heartbeat
+ * file says `ended`, written once and never deleted, so spool adoption judges it by its time as before. The
+ * beat starts over idle, with no prompt, for whichever session goes on. Fire-and-forget; never throws.
+ */
+export function endBeat(io: Io, sid: string): void {
+  if (!sid || endedSessions.has(sid)) return
+  endedSessions.add(sid)
+  const now = Date.now()
+  const { prompt: _prompt, ...rest } = S.beat
+  S.beat = { ...rest, state: 'idle', since: now }
+  if (!S.gitOk || !S.root) return
+  try {
+    void io.fs.write(`${S.root}/alive/${sid}`, beatText({ ...rest, state: 'ended', since: now, at: now, holds: [], holdsUnknown: 0 })).catch(() => undefined)
+  } catch {
+    // A heartbeat file is throwaway: the worst is an ended chat shown until its file goes stale
+  }
 }
 
 /** Whether a session has shown a heartbeat lately. */

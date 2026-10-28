@@ -4,10 +4,11 @@ import type { Io } from './io.ts'
 import { parseTurnFile, type TurnDoc } from './checkpoint.ts'
 import { S } from './state.ts'
 
-export async function git(io: Io, args: string[], init: { stdin?: string; env?: Record<string, string> } = {}): Promise<{ ok: boolean; out: string; err: string; cut?: true }> {
-  const r = await io.process.run(['git', `--git-dir=${S.repo}`, ...args], { timeoutMs: 20_000, ...init })
+/** `gitDir` is this project's repo unless a caller reads another's (a peer's history). */
+export async function git(io: Io, args: string[], init: { stdin?: string; env?: Record<string, string>; cwd?: string } = {}, gitDir = S.repo): Promise<{ ok: boolean; code: number; out: string; err: string; cut?: true }> {
+  const r = await io.process.run(['git', `--git-dir=${gitDir}`, ...args], { timeoutMs: 20_000, ...init })
   // Output past the 4 MiB a process returns is cut: callers that list or search say so instead of trusting it
-  return { ok: r.exitCode === 0, out: r.stdout.trim(), err: r.stderr.trim(), ...(r.isStdoutTruncated ? { cut: true as const } : {}) }
+  return { ok: r.exitCode === 0, code: r.exitCode, out: r.stdout.trim(), err: r.stderr.trim(), ...(r.isStdoutTruncated ? { cut: true as const } : {}) }
 }
 
 export const utf8 = new TextEncoder()
@@ -17,15 +18,16 @@ export const utf8Out = new TextDecoder()
  * Reads many `<tree>:<path>` files in one git process per 40 (cat-file
  * --batch), not one each: a long session's compaction reads every turn
  * since the last keyframe. A batch cut at the output cap is read one by one.
+ * `init.cwd` is where the processes run: another project's repo is read from '/', the way `git` does it.
  */
-export async function readFiles(io: Io, specs: readonly string[]): Promise<Map<string, string>> {
+export async function readFiles(io: Io, specs: readonly string[], gitDir = S.repo, init: { cwd?: string } = {}): Promise<Map<string, string>> {
   const out = new Map<string, string>()
   for (let i = 0; i < specs.length; i += 40) {
     const chunk = specs.slice(i, i + 40)
-    const r = await io.process.run(['git', `--git-dir=${S.repo}`, 'cat-file', '--batch'], { stdin: `${chunk.join('\n')}\n`, timeoutMs: 30_000 })
+    const r = await io.process.run(['git', `--git-dir=${gitDir}`, 'cat-file', '--batch'], { stdin: `${chunk.join('\n')}\n`, timeoutMs: 30_000, ...init })
     if (r.exitCode !== 0 || r.isStdoutTruncated) {
       for (const spec of chunk) {
-        const one = await git(io, ['show', spec])
+        const one = await git(io, ['show', spec], init, gitDir)
         if (one.ok) out.set(spec, one.out)
       }
       continue
@@ -52,7 +54,7 @@ export async function readFiles(io: Io, specs: readonly string[]): Promise<Map<s
       synced += 1
     }
     for (const spec of chunk.slice(synced)) {
-      const one = await git(io, ['show', spec])
+      const one = await git(io, ['show', spec], init, gitDir)
       if (one.ok) out.set(spec, one.out)
     }
   }

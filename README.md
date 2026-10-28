@@ -83,6 +83,68 @@ turn is placed after the exact turn it continues:
 Turn numbers follow the line: a fork of turn 2 numbers its first turn 3, and
 so does a rewind to turn 2. The row index lives in `~/.claude/convo/<project>/rows/`.
 
+## Other chats here
+
+Run a Claude Code chat at the top of a set of projects, and others in the
+folders below it, and the top one can see them. The **Live** tab (5) lists the
+live chats inside this folder: subfolders and worktrees included, never the
+chat itself, and never a chat outside the folder.
+
+```
+1: History   2: Context   3: Lines   4: Agents   5: [Live (2)]
+────────────────────────────────────────────
+ backend               working 3m   "migrate payments repo to sqlc"
+ backend/wt agent-a1b2 working 41s  "fix trial billing proration"
+ frontend              idle 12m     last: "checkout form validation"
+ 2 chats here aren't recorded by convo
+```
+
+Each row shows the chat's folder relative to this one, whether it is working
+or idle and for how long, and its prompt (or its last prompt, when idle).
+Working chats come first. The tab's label counts the working ones. Press a
+row to see its last 5 turn subjects, or "could not be read (git failed)" when
+git could not read that chat's history (as opposed to "no turns recorded yet").
+The last line counts chats here that convo isn't recording: chats in a folder
+you excluded, or started without convo. A chat that `/clear`s, resumes another
+or branches drops off the list under its old id at once, and shows up under
+its new one.
+
+Live refreshes only while the pane is open, and reads git only while the Live
+tab is open. With the pane closed, nothing is scanned.
+
+Claude has the same view in the `peers` tool. Ask what the other chats are
+doing, what is left across the work, or whether a worktree can be removed. It
+asks your permission first, since it reads beyond this chat ("Allow this
+session" makes it one question). It lists each live chat with its folder,
+state, prompt, recent turns and the files it touched, and ends with an
+`In use:` line: the absolute folders that live chats are in, or have given to
+a worktree subagent, and the folders of the chats here convo isn't recording.
+A worktree subagent's folder counts from its first turn, however its worktree
+was asked for (the Agent call or the agent's own definition). A worktree under
+a chat whose worktree subagent has a path convo could not learn counts as
+possibly in use, so it errs on the side of calling a worktree busy. Set `chat` to a folder or a session id prefix and
+it reads that chat's last turns in full.
+
+### Where convo is off
+
+convo is off in automated sessions: `claude -p`, the SDK, and anything else
+nobody types into. It is also off in the folders you list in `excludeFolders`,
+with everything inside them. Off means off: it holds back no tools, condenses
+or clears no output, writes no brief, opens no pane, lists no tools and
+creates no folder under `~/.claude/convo/`. Automated chats never appear as
+peers.
+
+`excludeFolders` is a setting (in `/config` under convo, or in settings), folder
+paths separated by commas. `~` is expanded.
+
+```json
+{ "pluginConfigs": { "convo": { "options": { "excludeFolders": "~/Downloads, ~/work/client-x" } } } }
+```
+
+To have convo record a `claude -p` run, set `CONVO_FORCE=1` in its
+environment. That turns on the non-interactive rule only: an excluded folder
+stays off.
+
 ## Keyframes replace compaction
 
 When Claude Code compacts (`/compact`, or its own threshold), convo answers in
@@ -168,6 +230,7 @@ with safe defaults:
 | A new conversation | Begins with a brief of where this project's last conversation left off (below) | `brief` | on |
 | Prompt cache | Measured only: how long until it goes cold, and what a cold send costs (below) | `cacheTtl` (`5m`, `1h`) | by plan |
 | Skills and agent types | Measured only: the pane says what this project has not used | | |
+| Folders left alone | convo stays off in these folders and everything inside them (see Where convo is off, above) | `excludeFolders`, comma-separated | none |
 
 Core tools (Read, Edit, Write, Bash, Grep, Glob, Agent, Skill, ToolSearch,
 TodoWrite, AskUserQuestion and a few more) are never held back, nor is
@@ -312,7 +375,7 @@ queued your next message, it waits for the end of the next turn.
 
 ## Merge and recall, by asking
 
-convo gives Claude five tools. You never call them; you just say what you want.
+convo gives Claude six tools. You never call them; you just say what you want.
 
 | Tool | Claude uses it when you say something like | What it does |
 | --- | --- | --- |
@@ -321,11 +384,12 @@ convo gives Claude five tools. You never call them; you just say what you want.
 | `turn` | "What exactly did I say in my first message?" | Reads one turn in full, tool output included |
 | `branches` | "What other lines do we have?" | Lists forks, `/branch` copies and rewound attempts, and where each split from this one |
 | `pane` | "Show me convo's pane" | Opens the pane beside the chat (below), for when you closed it or the screen was too narrow for it to open by itself |
+| `peers` | "What are the other chats doing?", "Which worktrees can I remove?" | Lists the live chats in this folder with their recent turns and files, and which folders they are using (see Other chats here) |
 
-Recall and merge sit in Claude's tool list; the other three load when needed.
+Recall and merge sit in Claude's tool list; the other four load when needed.
 Searching and reading this conversation's own history never asks permission.
 Reading other conversations in the project (recall or turn on another branch,
-the branches list) and merging ask you first, in a small question with
+the branches list, peers) and merging ask you first, in a small question with
 "Allow once", "Allow this session" and "Don't allow", so an instruction planted
 in a web page or file cannot quietly pull another conversation in. convo asks
 this itself, whatever your permission mode (auto mode's approver does not
@@ -357,13 +421,13 @@ finishes after its conversation was cleared or switched.
 ## Looking at it
 
 convo's pane sits beside the chat and follows the conversation as it goes,
-in four tabs: **1 History**, this conversation's commits newest first;
+in five tabs: **1 History**, this conversation's commits newest first;
 **2 Context**, what every request carries (next section); **3 Lines**, forks,
-rewinds, merges and open questions; **4 Agents**, subagents as they run.
+rewinds, merges and open questions; **4 Agents**, subagents as they run; **5 Live**, the other chats running in this folder.
 
 ```
 aaaaaaaa · 14 turns · from keyframe 2 + 3
-1: [History]   2: Context   3: Lines   4: Agents (1)
+1: [History]   2: Context   3: Lines   4: Agents (1)   5: Live
 ────────────────────────────────────────────
 ● 14  now  Fix the transfer test
 │          Edit×2 Bash · 41k in · $0.04
@@ -480,6 +544,10 @@ node --experimental-strip-types --no-warnings convo/tests/e2e/run.ts   # real gi
 bash convo/live-test.sh                                      # all of it, with real Claude Code sessions
 ```
 
+convo is off in non-interactive sessions, so the live test and the e2e run
+set `CONVO_FORCE=1` to turn it on for `claude -p`. Do the same to have convo
+record a `claude -p` run of your own; it does not override `excludeFolders`.
+
 `claude plugin test` runs the hooks against Claude Code's engine, with git
 stood in for. `tests/e2e` runs the same hooks against real git in a throwaway
 home folder, with a scripted model and transcripts written the way Claude Code
@@ -533,7 +601,7 @@ afterwards.
 | `session.ts` | Session switches and native compactions noticed |
 | `history.ts`, `tools.ts` | recall, turn, branches, merge and pane |
 | `view.ts` | What the pane beside the chat shows, built from git (`types/index.d.ts` declares it) |
-| `timeline.ts`, `panel.ts` | The pane's History from git, and its four tabs as lines and buttons |
+| `timeline.ts`, `panel.ts` | The pane's History from git, and its five tabs as lines and buttons |
 | `agents.ts` | Subagents as they run: progress, cost, looking stuck, the status line and toasts |
 | `warmth.ts` | How warm the prompt cache is, and what the next send costs either side of it going cold |
 | `ledger.ts` | The token ledger and cache misses the pane shows |

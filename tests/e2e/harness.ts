@@ -175,7 +175,7 @@ export class World {
         return { size: s.size, mtimeMs: s.mtimeMs }
       },
     },
-    env: { get: async (k: string) => (k === 'HOME' ? this.o.home : k === 'CLAUDE_CONFIG_DIR' ? this.configDir : undefined) },
+    env: { get: async (k: string) => (k === 'HOME' ? this.o.home : k === 'CLAUDE_CONFIG_DIR' ? this.configDir : k === 'CONVO_FORCE' ? '1' : undefined) },
     clock: {
       every: (_ms: number, f: () => unknown) => void this.every.push(f),
       after: (ms: number, f: () => unknown) => {

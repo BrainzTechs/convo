@@ -4,6 +4,7 @@
 // `let` cannot be assigned from outside its module). Maps and sets that are
 // only ever changed in place live beside it.
 
+import type { Beat } from './live.ts'
 import type { Row } from './turns.ts'
 
 export const S = {
@@ -18,6 +19,9 @@ export const S = {
   /** Whether history is on in this session, and why not when it is off. */
   gitOk: false,
   offWhy: '',
+  /** Whether convo is on in this session at all (an automated session or an excluded folder leaves it off), and why not. */
+  active: false,
+  inactiveWhy: '',
 
   /** The spool flush in progress, if one is; how many spool files this process wrote. */
   flushRun: undefined as Promise<void> | undefined,
@@ -49,6 +53,9 @@ export const S = {
   /** The session's permission mode as the last prompt's hooks saw it ('' before one). */
   permissionMode: '',
 
+  /** What the heartbeat file says about this chat (the time it was written is added then). */
+  beat: { v: 1, state: 'idle', since: 0 } as Omit<Beat, 'at'>,
+
   /** Goes up whenever this process moves the history (a commit, a merge, a session switch): the pane redraws on it. */
   moved: 0,
 
@@ -56,6 +63,10 @@ export const S = {
   compactedAt: undefined as number | undefined,
 }
 
+/** Subagents whose spawning call asked for a git worktree of their own: where they edit is unknown, so they only count as unknown holds. */
+export const worktreeAgents = new Set<string>()
+/** The directory a subagent was told to run in, by subagent id: a real hold while it runs. */
+export const agentCwds = new Map<string, string>()
 /** Running subagents' rows, each until its turn ends. */
 export const agentRows = new Map<string, Row[]>()
 /** tool_use id → subagent id. */
@@ -72,11 +83,13 @@ export const agentBase = new Map<string, string[]>()
 export const lateAgents = new Map<string, string>()
 /** Sessions that went on from another conversation as a resume (`claude --resume`, /resume), not a fork: their first turn says "continued". */
 export const resumed = new Set<string>()
+/** Sessions this process ran and saw end (a /clear, a resume, a /branch, a fork, a rewind): their heartbeat file says `ended` and is not written again. */
+export const endedSessions = new Set<string>()
 /** A /resume was asked for (or a session ended for one): the next session switch is that resume. */
 export const resume = { pending: false }
 
 /** The full names the tools were registered under (mcp__<plugin>__<name>). */
-export const toolNames = { recall: 'mcp__convo__recall', turn: 'mcp__convo__turn', branches: 'mcp__convo__branches', merge: 'mcp__convo__merge', pane: 'mcp__convo__pane', context: 'mcp__convo__context' }
+export const toolNames = { recall: 'mcp__convo__recall', turn: 'mcp__convo__turn', branches: 'mcp__convo__branches', merge: 'mcp__convo__merge', pane: 'mcp__convo__pane', context: 'mcp__convo__context', peers: 'mcp__convo__peers' }
 
 /** Runs `fn` after every earlier history rewrite (keyframe, merge) has settled. */
 export function exclusive<T>(fn: () => Promise<T>): Promise<T> {

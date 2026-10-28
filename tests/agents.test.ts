@@ -106,6 +106,6 @@ describe('subagents as they run', () => {
     // The tab's label counts the running ones, whichever tab is open
     const view: ConvoView = { sid: 'aaaaaaaa-1', turns: 2, questions: [], tasks: 0, lines: [], merges: [], agents: { all: 0, merged: 0 }, others: 0, at: '', history: [] }
     const tabs = panelNodes({ view, ledger: undefined, ui: { tab: 'history' }, width: 80, now, focused: false, agents: [a, done] })[1]
-    expect(tabs?.t === 'row' && tabs.items.map(b => b.text)).toEqual(['[History]', 'Context', 'Lines', 'Agents (1)'])
+    expect(tabs?.t === 'row' && tabs.items.map(b => b.text)).toEqual(['[History]', 'Context', 'Lines', 'Agents (1)', 'Live'])
   })
 })

@@ -22,10 +22,10 @@ import type { EngineInterface, Register, RenderElement } from 'claude-code'
 import type { Io } from './io.ts'
 import { messageTokens, tailStart, tokensOf, turnStarts } from './checkpoint.ts'
 import { KEPT_DOORS, assembleTurn, refs, toBlocks, turnDir, type Row } from './turns.ts'
-import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, resume, resumed, startText } from './state.ts'
+import { S, agentBase, agentRows, agentSession, agentsByToolUse, finishedAgents, lateAgents, resume, resumed, startText, agentCwds, worktreeAgents } from './state.ts'
 import { transcriptOf, transcripts } from './rows.ts'
 import { ensureRepo, projectRoot } from './repo.ts'
-import { adoptOrphans, enqueue, flush, heartbeat } from './spool.ts'
+import { adoptOrphans, endBeat, enqueue, flush, heartbeat } from './spool.ts'
 import { SUMMARY_OPENING, noticeCompaction, recordCompaction, rowsFor, useSession } from './session.ts'
 import { permit } from './permission.ts'
 import { REFRESH_TURNS, briefSource, buildCheckpoint, buildOwed, refreshRecords } from './keyframes.ts'
@@ -38,13 +38,15 @@ import { condense } from './condense.ts'
 import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
-import type { ConvoAgent, ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
+import type { ConvoAgent, ConvoEntry, ConvoLedger, ConvoLive, ConvoUi, ConvoView } from '../types/index.d.ts'
 import { coldToast, ttlOf, warmthOf } from './warmth.ts'
 import { HANDBACK, called, endToast, finished, priced, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, weightOf } from './agents.ts'
 import { panelNodes, type Action, type PanelButton } from './panel.ts'
 import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
 import { withTrailers } from './lineage.ts'
+import { decideActive, parseExclude, type Beat } from './live.ts'
+import { collectLive, peersTool } from './peers.ts'
 
 /**
  * The engine as convo's modules use it. Claude Code follows `$` only into
@@ -120,20 +122,49 @@ async function act($: EngineInterface, a: Action): Promise<void> {
     const ui: ConvoUi = (await $.state.get(UI)).value ?? { tab: 'history' }
     if (a.kind === 'tab') {
       await $.state.set(UI, { ...ui, tab: a.tab })
+      // The Live tab opens on fresh rows, not on those of the last 15 s tick
+      if (a.tab === 'live') void liveTick($, true)
     } else if (a.kind === 'fill') {
       await $.prompt.fill({ text: a.text, mode: 'replace' })
     } else if (ui.open === a.id) {
       await $.state.set(UI, { tab: ui.tab })
     } else {
       await $.state.set(UI, { tab: ui.tab, open: a.id })
-      // An agent's row opens on what the tab already holds
-      if (a.id.startsWith('agent:')) return
+      // An agent's or a peer's row opens on what the tab already holds
+      if (a.id.startsWith('agent:') || a.id.startsWith('peer:')) return
       const detail = a.path && a.tip ? await turnDetail(ioOf($), a.tip, a.path) : undefined
       const now: ConvoUi = (await $.state.get(UI)).value ?? { tab: 'history' }
       if (now.open === a.id) await $.state.set(UI, { ...now, detail: detail ?? { asked: '', answer: '(not found in git yet: it is committed a moment after the turn ends)', tools: [], files: [] } })
     }
   } catch (err) {
     $.ui.log(`convo: the pane's ${a.kind} did not go through: ${String(err).slice(0, 200)}`, { to: 'debug' })
+  }
+}
+
+// ── The other chats in this folder ───────────────────────────────────
+// The Live tab. Nothing is scanned unless the pane is open: every 30 s a cheap scan keeps the tab's count
+// (heartbeat files only), and every 15 s, while the Live tab is showing, the rows are read in full.
+const LIVE = { plugin: 'convo', key: 'live' } as const
+/** Whether convo's pane is placed beside the chat. */
+let paneOpen = false
+/** A tick still under way: a peer's git read can take 20 s, so the next tick waits for it. */
+let liveBusy = false
+/** The person's home folder, where session.start found it. */
+let liveHome = ''
+
+async function liveTick($: EngineInterface, full: boolean): Promise<void> {
+  if (!paneOpen || liveBusy || !S.active) return
+  liveBusy = true
+  try {
+    if (full && ((await $.state.get(UI)).value ?? { tab: 'history' }).tab !== 'live') return
+    const prev: ConvoLive | undefined = (await $.state.get(LIVE).catch(() => undefined))?.value
+    const live = await collectLive(ioOf($), { home: liveHome, coordCwd: S.cwd, selfSid: S.sid, projectsDir: S.projectsDir, now: Date.now(), full, ...(prev ? { prev } : {}) })
+    // A cheap pass redraws only when the count moved
+    if (full || live.working !== (prev?.working ?? 0)) await $.state.set(LIVE, live)
+  } catch (err) {
+    $.ui.log(`convo: the Live tab was not refreshed: ${String(err).slice(0, 200)}`, { to: 'debug' })
+  } finally {
+    liveBusy = false
   }
 }
 
@@ -152,6 +183,47 @@ let statusBase: string | undefined
 let statusShown: string | undefined
 
 const isLive = (a: ConvoAgent): boolean => a.status === 'running' || a.status === 'waiting'
+
+const liveRun = (id: string): boolean => {
+  const a = runs.get(id)
+  return a !== undefined && isLive(a)
+}
+
+/** Worktree subagents still running whose folder is not known: the heartbeat only counts them. One given a folder is a hold instead. */
+const worktreesRunning = (): number => [...worktreeAgents].filter(id => !agentCwds.has(id) && liveRun(id)).length
+
+/** The folders running subagents were told to work in. */
+const agentFolders = (): string[] => [...agentCwds].filter(([id]) => liveRun(id)).map(([, dir]) => dir)
+
+/** The project folder this chat works in when it is not where it started (a worktree it moved into); none when it is the same. */
+async function holdsOf($: EngineInterface): Promise<string[]> {
+  try {
+    const root = await $.session.root()
+    return [...new Set([...(root && root !== S.cwd ? [root] : []), ...agentFolders()])]
+  } catch {
+    return agentFolders()
+  }
+}
+
+/**
+ * What the heartbeat says now: the chat's state as the events left it, with its holds read fresh from the
+ * runs, so a subagent that started, came back or ended counts at the next write, an event or the timer's.
+ * The state is read after the await, so a turn that started meanwhile is never written over with an older one.
+ */
+async function freshBeat($: EngineInterface): Promise<Omit<Beat, 'at'>> {
+  const holds = await holdsOf($)
+  return { ...S.beat, holds, holdsUnknown: worktreesRunning() }
+}
+
+/** Writes the heartbeat as it stands now. */
+async function writeBeat($: EngineInterface): Promise<void> {
+  await heartbeat(ioOf($), await freshBeat($))
+}
+
+/** The heartbeat in the background: a chat's state change never waits on a file write. */
+function beatNow($: EngineInterface): void {
+  void writeBeat($).catch(() => undefined)
+}
 
 function setRun(a: ConvoAgent): void {
   runs.set(a.id, a)
@@ -689,10 +761,20 @@ export const register: Register = (on, options) => {
   settings.neverCondense = parseKeep(o.neverCondense)
   settings.brief = o.brief !== false
   settings.cacheTtl = typeof o.cacheTtl === 'string' ? o.cacheTtl.trim() : ''
+  const excludeFolders = o.excludeFolders
 
   on('session.start', async ($, e, next) => {
+    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
+    const verdict = decideActive({ isInteractive: e.isInteractive, force: await $.env.get('CONVO_FORCE'), cwd: e.cwd, exclude: parseExclude(excludeFolders, home) })
+    S.active = verdict.active
+    S.inactiveWhy = verdict.why
+    if (!verdict.active) {
+      $.ui.log(`convo: off in this session: ${verdict.why}`, { to: 'debug' })
+      return next(e)
+    }
     const io = ioOf($)
     ioOfStatic = io
+    S.beat = { v: 1, state: 'idle', since: Date.now(), interactive: e.isInteractive }
     const kept = await $.store.get('tool-sizes')
     if (kept && typeof kept === 'object' && !Object.keys(toolSizes).length) toolSizes = kept as Record<string, number>
     if (toolSizes.ToolSearch !== undefined) toolSearchSeen = true
@@ -700,8 +782,8 @@ export const register: Register = (on, options) => {
     if (typeof rate === 'number' && rate > 0) toolRate = rate
     // A reload: what this process held back before it
     if (!Object.keys(heldTools).length) Object.assign(heldTools, (await $.state.get(HELD).catch(() => undefined))?.value ?? {})
-    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
     S.cwd = e.cwd
+    liveHome = home
     S.root = home ? await projectRoot(io, home, e.cwd) : ''
     S.repo = `${S.root}/repo.git`
     S.projectsDir = `${(await $.env.get('CLAUDE_CONFIG_DIR')) ?? (home ? `${home}/.claude` : '.')}/projects`
@@ -721,12 +803,19 @@ export const register: Register = (on, options) => {
     $.clock.every(2000, () => tickAgents($))
     seenHour = (await $.store.get('cache-seen-1h').catch(() => undefined)) === true
     $.clock.every(30_000, () => tickCache($))
+    $.clock.every(30_000, () => liveTick($, false))
+    $.clock.every(15_000, () => liveTick($, true))
     if (!S.gitOk) {
       showStatus($, `history is off (${why})`)
     } else {
       $.clock.every(2000, () => flush(io))
-      await heartbeat(io)
-      $.clock.every(30_000, () => heartbeat(io))
+      // A heartbeat that cannot be written costs this chat its place in the Live tab, never the rest of its start
+      try {
+        await writeBeat($)
+      } catch (err) {
+        $.ui.log(`convo: no heartbeat written: ${String(err).slice(0, 200)}`, { to: 'debug' })
+      }
+      $.clock.every(30_000, () => writeBeat($).catch(() => undefined))
       $.clock.after(5000, () => adoptOrphans(io))
       $.clock.every(300_000, () => adoptOrphans(io))
       await registerTools(io)
@@ -756,7 +845,7 @@ export const register: Register = (on, options) => {
     }
     await saveLedger($)
     // Beside the chat on a wide enough screen, unless the person closed it; asking Claude brings it back
-    if (e.isInteractive && (await $.store.get('pane-closed')) !== true) void $.ui.open({ id: PANE, title: 'convo' })
+    if (e.isInteractive && (await $.store.get('pane-closed')) !== true) void $.ui.open({ id: PANE, title: 'convo' }).then(r => { paneOpen = r.isPlaced }).catch(() => undefined)
     clearingOff = e.isInteractive ? '' : 'a plugin cannot start a compaction outside an interactive session'
     return next(e)
   })
@@ -764,6 +853,7 @@ export const register: Register = (on, options) => {
   // Each built-in tool as Claude Code lists it: its share of the setup, and, when this project has not used it, held
   // back behind ToolSearch (its name stays listed; Claude loads it when it needs it)
   on('tool.describe', async ($, e, next) => {
+    if (!S.active) return next(e)
     const r = await next(e)
     const provider = e.provider as { plugin?: string }
     const deferred = r.isDeferred === undefined ? e.isDeferred === true : r.isDeferred === true
@@ -785,11 +875,16 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (!S.active) return next(e)
+    paneOpen = false
     if (e.origin.kind === 'person') await $.store.set('pane-closed', true)
     return next(e)
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (!S.active) return next(e)
+    // Drawn, however it was opened (convo's own open, the person's, a reload): the Live tab's scans run
+    paneOpen = true
     const { Box, Text, Button } = $.ui.resolve(e)
     let view = (await $.state.get(VIEW)).value
     const tokens = (await $.state.get(LEDGER)).value
@@ -802,7 +897,8 @@ export const register: Register = (on, options) => {
       view = { ...view, ...history, questions: [], lines: [], merges: [], context: undefined }
     }
     const agents = (await $.state.get(AGENTS)).value ?? []
-    const nodes = panelNodes({ view, ledger: tokens, ui, width, now: Date.now(), focused: e.props.isFocused, agents, ...(agent ? { agent } : {}) })
+    const live = (await $.state.get(LIVE)).value
+    const nodes = panelNodes({ view, ledger: tokens, ui, width, now: Date.now(), focused: e.props.isFocused, agents, ...(live ? { live } : {}), ...(agent ? { agent } : {}) })
     // Drawn with h() rather than JSX, so this module stays a .ts file Node can run in the tests
     const button = (n: PanelButton): RenderElement => h(Button, { key: n.key, plain: true, ...(n.hotkey ? { hotkey: n.hotkey } : {}), ...(n.tone === 'dim' ? { dimColor: true } : {}), onPress: () => void act($, n.action) }, n.tone === 'bold' ? h(Text, { bold: true }, n.text) : n.text) as RenderElement
     return h(Box, { flexDirection: 'column' }, ...nodes.map(n => (n.t === 'text'
@@ -814,6 +910,7 @@ export const register: Register = (on, options) => {
   // /resume however it runs (typed, or a plugin's $.command.run): the session switch that follows is a resume; one
   // the person cancelled leaves none pending
   on('command.run', { command: 'resume' }, async ($, e, next) => {
+    if (!S.active) return next(e)
     resume.pending = true
     const r = await next(e)
     if (/cancel/i.test(r.text ?? '')) resume.pending = false
@@ -821,8 +918,11 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
+    if (!S.active) return next(e)
     // Another session takes this one's place: a resume. Anything else (a /clear) is no resume
     resume.pending = e.reason === 'resume'
+    // The ending session's file says so; after a /clear or a resume the process goes on idle under another id
+    endBeat(ioOf($), typeof e.sessionId === 'string' && e.sessionId ? e.sessionId : S.sid)
     try {
       await flush(ioOf($))
     } catch {
@@ -833,6 +933,7 @@ export const register: Register = (on, options) => {
 
   // ── Rows: buffered per conversation until their turn ends ────────────
   on('session.append', { door: ['prompt', 'response', 'tool-result', 'command', 'delivery', 'compaction'] }, async ($, e, next) => {
+    if (!S.active) return next(e)
     // A followed subagent's tool calls and their results: what it is doing now
     const run = e.agentId ? runs.get(e.agentId) : undefined
     if (run && (e.door === 'response' || e.door === 'tool-result')) {
@@ -888,14 +989,16 @@ export const register: Register = (on, options) => {
   // Claude Code's own permission step is reached, so convo asks here itself: reading this branch's own history
   // needs nothing; reading other sessions' history, listing them, and merging (which writes records and calls a
   // model) wait for the person, so an instruction injected into a turn cannot quietly pull another conversation in.
-  // One hook serves all four; a registered tool's arguments arrive on the event itself, beside `tool`
-  on('tool.call', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__pane', 'mcp__convo__context'] }, async ($, e) => {
+  // One hook serves all of them; a registered tool's arguments arrive on the event itself, beside `tool`
+  on('tool.call', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__pane', 'mcp__convo__context', 'mcp__convo__peers'] }, async ($, e, next) => {
+    if (!S.active) return next(e)
     if (e.tool === 'mcp__convo__context') return { result: await contextTool($, e as { readonly [k: string]: unknown }) }
     // Showing the pane reads nothing beyond what the person sees: no permission, and it works with history off
     if (e.tool === 'mcp__convo__pane') {
       await $.store.set('pane-closed', false)
       await publish($, true)
       const opened = await $.ui.open({ id: PANE, title: 'convo' })
+      paneOpen = opened.isPlaced
       return { result: opened.isPlaced ? "convo's pane is open beside the chat." : `convo's pane is open but not shown here: ${opened.reason}.` }
     }
     if (!S.gitOk) return { result: `convo is off in this session: ${S.offWhy}.` }
@@ -906,6 +1009,7 @@ export const register: Register = (on, options) => {
       if (e.tool === 'mcp__convo__recall') return { result: await recall(ioOf($), input) }
       if (e.tool === 'mcp__convo__turn') return { result: await readTurn(ioOf($), input) }
       if (e.tool === 'mcp__convo__branches') return { result: await branchList(ioOf($)) }
+      if (e.tool === 'mcp__convo__peers') return { result: await peersTool(ioOf($), input, { home: liveHome, coordCwd: S.cwd, selfSid: S.sid, projectsDir: S.projectsDir }) }
       return { result: await mergeBranch(ioOf($), input) }
     } catch (err) {
       return { result: `convo could not do that: ${String(err).slice(0, 300)}` }
@@ -914,6 +1018,7 @@ export const register: Register = (on, options) => {
 
   // ── Compaction: a keyframe in place of the native summary ─────────────
   on('session.compact', async ($, e, next) => {
+    if (!S.active) return next(e)
     // convo's own clearing: the same messages, old tool output stubbed; the engine keeps the rest as it was
     if (clearing && e.trigger === 'plugin' && !e.agentId) {
       const plan = planClearing(e.messages, { lastTurn: clearing.lastTurn })
@@ -990,6 +1095,7 @@ export const register: Register = (on, options) => {
   // Fallback 2: where the guard holds the compaction hook back, the first
   // prompt after a native compaction carries the keyframe as context
   on('prompt.submit', async ($, e, next) => {
+    if (!S.active) return next(e)
     if (!S.gitOk) return next(e)
     let extra: string | undefined
     try {
@@ -1036,11 +1142,25 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {
+    if (!S.active) return next(e)
     const r = await next(e)
     // Followed in the Agents tab; a teammate (long-lived, waiting for messages) is a team's, not followed here
     if (r.agentId && !e.isTeammate) {
       try {
         setRun(spawned({ id: r.agentId, type: e.subagentType, task: e.description || e.prompt.split('\n')[0]?.slice(0, 60) || '', ...(e.parentAgentId ? { parent: e.parentAgentId } : {}), background: e.background === true, model: r.model, ...(e.parentAgentId ? {} : { turn: turnNow }), at: Date.now() }))
+      } catch {
+        // Following never gets in the way of the agent
+      }
+    }
+    // Where the subagent works, for the heartbeat: the folder the call set, or (its own worktree) a folder not known
+    if (r.agentId && !e.isTeammate) {
+      try {
+        const rows = e.parentAgentId ? (agentRows.get(e.parentAgentId) ?? []) : S.mainRows
+        const call = rows.flatMap(x => x.blocks).find(b => b.type === 'tool_use' && b.id === e.tool_use_id)
+        const input = call?.type === 'tool_use' ? (call.input as { isolation?: unknown } | null | undefined) : undefined
+        if (input?.isolation === 'worktree') worktreeAgents.add(r.agentId)
+        if (e.cwd) agentCwds.set(r.agentId, e.cwd)
+        if (worktreeAgents.has(r.agentId) || e.cwd) beatNow($)
       } catch {
         // Following never gets in the way of the agent
       }
@@ -1058,6 +1178,7 @@ export const register: Register = (on, options) => {
   // Each model request: its usage goes in the ledger, and a request that re-caches what was cached is a miss.
   // A streaming event: the hook passes the response through untouched and reads its usage at the end
   on('turn.step', async function* ($, e, next) {
+    if (!S.active) return yield* next(e)
     const response = yield* next(e)
     try {
       const u = response.usage
@@ -1084,6 +1205,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    if (!S.active) return next(e)
     // The number this main turn will get: one past what this line holds
     if (!e.agentId) turnNow = lastTurns + turnsSince + 1
     // A finished subagent a message brought back: running again
@@ -1092,9 +1214,38 @@ export const register: Register = (on, options) => {
       const { ended: _e, warned: _w, merged: _m, ...rest } = back
       setRun({ ...rest, status: 'running', lastAt: Date.now() })
     }
+    // Where a subagent works, from inside its own loop: the only word on a worktree its definition asked for
+    const sub = (e as { readonly agentId?: string }).agentId
+    if (sub) {
+      try {
+        const cwd = await $.session.cwd()
+        if (cwd && cwd !== S.cwd) agentCwds.set(sub, cwd)
+      } catch {
+        // Not known: a worktree the spawning call asked for still counts as an unknown hold
+      }
+    }
     // A changed session id means /clear, /branch, a fork or a rewind: a new branch
     await useSession(ioOf($), await $.session.id())
     startText.set(e.turnId, e.text)
+    if (!e.agentId) {
+      // A turn a task notification started is not the person's: the beat keeps the prompt they last typed
+      if (e.text.trimStart().startsWith('<task-notification>')) {
+        S.beat = { ...S.beat, state: 'working', since: Date.now(), turns: turnNow }
+      } else {
+        let prompt = ''
+        try {
+          prompt = mask(e.text).slice(0, 120)
+        } catch {
+          // The prompt is left out; the chat still reads as working
+        }
+        const { prompt: _was, ...rest } = S.beat
+        S.beat = { ...rest, state: 'working', since: Date.now(), turns: turnNow, ...(prompt ? { prompt } : {}) }
+      }
+      beatNow($)
+    } else if (sub && runs.has(sub)) {
+      // A followed subagent's turn (a new one, or one a message brought back): its holds count again
+      beatNow($)
+    }
     try {
       // prompt.submit already looked for this turn; a delivered turn (a notification) had none
       if (Date.now() - S.submittedAt > 10_000) await noticeCompaction(ioOf($))
@@ -1105,11 +1256,18 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (!S.active) return next(e)
     const result = await next(e)
     // A followed subagent's run ended, by its answer, an error, or being stopped
     const run = e.agentId ? runs.get(e.agentId) : undefined
     if (run) await refreshRate($)
     if (run) endRun($, run, e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.reason === 'aborted' ? 'killed' : 'done', e.reason === 'answer' ? e.answer : undefined)
+    // A subagent that ended no longer holds a worktree; the chat's own turn ending is idle
+    if (e.agentId && (worktreeAgents.has(e.agentId) || agentCwds.has(e.agentId))) beatNow($)
+    if (!e.agentId) {
+      S.beat = { ...S.beat, state: 'idle', since: Date.now() }
+      beatNow($)
+    }
     try {
       const agentId = e.agentId
       const rows = agentId ? (agentRows.get(agentId) ?? []) : S.mainRows

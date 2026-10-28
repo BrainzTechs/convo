@@ -39,7 +39,7 @@ export async function permit(io: Io, tool: string, input: { readonly [k: string]
     log('declined: dontAsk mode')
     return `This reads beyond this conversation and needs the person's approval, which dontAsk mode does not ask for: ${rule}.`
   }
-  const what = tool === 'mcp__convo__merge' ? "merge another line of this project into this conversation" : tool === 'mcp__convo__branches' ? "list this project's other conversations" : "read other conversations' history in this project"
+  const what = tool === 'mcp__convo__merge' ? "merge another line of this project into this conversation" : tool === 'mcp__convo__branches' ? "list this project's other conversations" : tool === 'mcp__convo__peers' ? "see what the other chats running in this folder are doing" : "read other conversations' history in this project"
   let answer: string
   try {
     answer = await io.ui.ask(`Let Claude ${what}?`, { options: [ALLOW_ONCE, ALLOW_SESSION, DECLINE], header: 'convo' })
