@@ -33,7 +33,7 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
 info() { printf '  \033[36mINFO\033[0m %s\n' "$1"; }
 ask()  {
   printf '\n\033[1m> %s\033[0m\n' "${*: -1}"
-  claude -p --plugin-dir "$MOD" "$@" 2>&1 | tee "$WORK/.last-answer" | sed 's/^/  /'
+  CONVO_FORCE=1 claude -p --plugin-dir "$MOD" "$@" 2>&1 | tee "$WORK/.last-answer" | sed 's/^/  /'
   # A mod Claude Code refuses to load records nothing: every check after would fail for the same reason
   if grep -q 'hooks module did not load' "$WORK/.last-answer"; then
     bad "Claude Code did not load convo (the line above says why); stopping here"

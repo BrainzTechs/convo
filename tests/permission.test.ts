@@ -28,7 +28,7 @@ function world(on: On, opts: { verdict: Verdict; answer?: string }, log: { asked
   })
   on('ui.status', () => ({ value: undefined }))
   mock.store(on)
-  mock.env(on, { HOME: '/h' })
+  mock.env(on, { HOME: '/h', CONVO_FORCE: '1' })
   mock.clock(on)
 }
 

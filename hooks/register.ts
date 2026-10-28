@@ -45,6 +45,7 @@ import { panelNodes, type Action, type PanelButton } from './panel.ts'
 import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
 import { withTrailers } from './lineage.ts'
+import { decideActive, parseExclude } from './live.ts'
 
 /**
  * The engine as convo's modules use it. Claude Code follows `$` only into
@@ -689,8 +690,17 @@ export const register: Register = (on, options) => {
   settings.neverCondense = parseKeep(o.neverCondense)
   settings.brief = o.brief !== false
   settings.cacheTtl = typeof o.cacheTtl === 'string' ? o.cacheTtl.trim() : ''
+  const excludeFolders = o.excludeFolders
 
   on('session.start', async ($, e, next) => {
+    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
+    const verdict = decideActive({ isInteractive: e.isInteractive, force: await $.env.get('CONVO_FORCE'), cwd: e.cwd, exclude: parseExclude(excludeFolders, home) })
+    S.active = verdict.active
+    S.inactiveWhy = verdict.why
+    if (!verdict.active) {
+      $.ui.log(`convo: off in this session: ${verdict.why}`, { to: 'debug' })
+      return next(e)
+    }
     const io = ioOf($)
     ioOfStatic = io
     const kept = await $.store.get('tool-sizes')
@@ -700,7 +710,6 @@ export const register: Register = (on, options) => {
     if (typeof rate === 'number' && rate > 0) toolRate = rate
     // A reload: what this process held back before it
     if (!Object.keys(heldTools).length) Object.assign(heldTools, (await $.state.get(HELD).catch(() => undefined))?.value ?? {})
-    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
     S.cwd = e.cwd
     S.root = home ? await projectRoot(io, home, e.cwd) : ''
     S.repo = `${S.root}/repo.git`
@@ -764,6 +773,7 @@ export const register: Register = (on, options) => {
   // Each built-in tool as Claude Code lists it: its share of the setup, and, when this project has not used it, held
   // back behind ToolSearch (its name stays listed; Claude loads it when it needs it)
   on('tool.describe', async ($, e, next) => {
+    if (!S.active) return next(e)
     const r = await next(e)
     const provider = e.provider as { plugin?: string }
     const deferred = r.isDeferred === undefined ? e.isDeferred === true : r.isDeferred === true
@@ -785,11 +795,13 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (!S.active) return next(e)
     if (e.origin.kind === 'person') await $.store.set('pane-closed', true)
     return next(e)
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (!S.active) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     let view = (await $.state.get(VIEW)).value
     const tokens = (await $.state.get(LEDGER)).value
@@ -814,6 +826,7 @@ export const register: Register = (on, options) => {
   // /resume however it runs (typed, or a plugin's $.command.run): the session switch that follows is a resume; one
   // the person cancelled leaves none pending
   on('command.run', { command: 'resume' }, async ($, e, next) => {
+    if (!S.active) return next(e)
     resume.pending = true
     const r = await next(e)
     if (/cancel/i.test(r.text ?? '')) resume.pending = false
@@ -821,6 +834,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
+    if (!S.active) return next(e)
     // Another session takes this one's place: a resume. Anything else (a /clear) is no resume
     resume.pending = e.reason === 'resume'
     try {
@@ -833,6 +847,7 @@ export const register: Register = (on, options) => {
 
   // ── Rows: buffered per conversation until their turn ends ────────────
   on('session.append', { door: ['prompt', 'response', 'tool-result', 'command', 'delivery', 'compaction'] }, async ($, e, next) => {
+    if (!S.active) return next(e)
     // A followed subagent's tool calls and their results: what it is doing now
     const run = e.agentId ? runs.get(e.agentId) : undefined
     if (run && (e.door === 'response' || e.door === 'tool-result')) {
@@ -889,7 +904,8 @@ export const register: Register = (on, options) => {
   // needs nothing; reading other sessions' history, listing them, and merging (which writes records and calls a
   // model) wait for the person, so an instruction injected into a turn cannot quietly pull another conversation in.
   // One hook serves all four; a registered tool's arguments arrive on the event itself, beside `tool`
-  on('tool.call', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__pane', 'mcp__convo__context'] }, async ($, e) => {
+  on('tool.call', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__pane', 'mcp__convo__context'] }, async ($, e, next) => {
+    if (!S.active) return next(e)
     if (e.tool === 'mcp__convo__context') return { result: await contextTool($, e as { readonly [k: string]: unknown }) }
     // Showing the pane reads nothing beyond what the person sees: no permission, and it works with history off
     if (e.tool === 'mcp__convo__pane') {
@@ -914,6 +930,7 @@ export const register: Register = (on, options) => {
 
   // ── Compaction: a keyframe in place of the native summary ─────────────
   on('session.compact', async ($, e, next) => {
+    if (!S.active) return next(e)
     // convo's own clearing: the same messages, old tool output stubbed; the engine keeps the rest as it was
     if (clearing && e.trigger === 'plugin' && !e.agentId) {
       const plan = planClearing(e.messages, { lastTurn: clearing.lastTurn })
@@ -990,6 +1007,7 @@ export const register: Register = (on, options) => {
   // Fallback 2: where the guard holds the compaction hook back, the first
   // prompt after a native compaction carries the keyframe as context
   on('prompt.submit', async ($, e, next) => {
+    if (!S.active) return next(e)
     if (!S.gitOk) return next(e)
     let extra: string | undefined
     try {
@@ -1036,6 +1054,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {
+    if (!S.active) return next(e)
     const r = await next(e)
     // Followed in the Agents tab; a teammate (long-lived, waiting for messages) is a team's, not followed here
     if (r.agentId && !e.isTeammate) {
@@ -1058,6 +1077,7 @@ export const register: Register = (on, options) => {
   // Each model request: its usage goes in the ledger, and a request that re-caches what was cached is a miss.
   // A streaming event: the hook passes the response through untouched and reads its usage at the end
   on('turn.step', async function* ($, e, next) {
+    if (!S.active) return yield* next(e)
     const response = yield* next(e)
     try {
       const u = response.usage
@@ -1084,6 +1104,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    if (!S.active) return next(e)
     // The number this main turn will get: one past what this line holds
     if (!e.agentId) turnNow = lastTurns + turnsSince + 1
     // A finished subagent a message brought back: running again
@@ -1105,6 +1126,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (!S.active) return next(e)
     const result = await next(e)
     // A followed subagent's run ended, by its answer, an error, or being stopped
     const run = e.agentId ? runs.get(e.agentId) : undefined

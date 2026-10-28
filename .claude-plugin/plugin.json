@@ -56,6 +56,12 @@
       "title": "Prompt cache lifetime",
       "description": "How long Claude Code's prompt cache lasts, for the warm or cold line in convo's Context tab: 5m or 1h. Empty: an hour on a subscription (or once a request is seen reading the cache after five idle minutes), five minutes with an API key. Set it when your promptCacheTtl setting says otherwise.",
       "default": ""
+    },
+    "excludeFolders": {
+      "type": "string",
+      "title": "Leave these folders alone",
+      "description": "Folders convo stays off in, with everything inside them, separated by commas (for example: ~/Downloads, ~/work/client-x).",
+      "default": ""
     }
   }
 }

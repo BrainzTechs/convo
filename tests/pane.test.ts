@@ -101,7 +101,7 @@ function world(on: On, opened: string[], stored: Record<string, unknown> = {}, g
   on('ui.status', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   mock.store(on, stored)
-  mock.env(on, { HOME: '/h' })
+  mock.env(on, { HOME: '/h', CONVO_FORCE: '1' })
   mock.clock(on)
 }
 

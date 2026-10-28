@@ -126,7 +126,7 @@ function world(on: On, files: Map<string, string>, commands: string[][]): void {
   on('turn.start', ($, e) => e)
   on('turn.complete', () => ({ text: '' }))
   mock.store(on)
-  mock.env(on, { HOME: '/h' })
+  mock.env(on, { HOME: '/h', CONVO_FORCE: '1' })
   mock.clock(on)
 }
 

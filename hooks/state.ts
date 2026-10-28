@@ -18,6 +18,9 @@ export const S = {
   /** Whether history is on in this session, and why not when it is off. */
   gitOk: false,
   offWhy: '',
+  /** Whether convo is on in this session at all (an automated session or an excluded folder leaves it off), and why not. */
+  active: false,
+  inactiveWhy: '',
 
   /** The spool flush in progress, if one is; how many spool files this process wrote. */
   flushRun: undefined as Promise<void> | undefined,
