@@ -378,6 +378,23 @@ describe('the Live tab keeps itself current', () => {
     await ui.unmount()
   })
 
+  test('a pane convo did not open itself still counts as open once drawn: the cheap tick scans', async ($, on) => {
+    const listed: string[] = []
+    const opened: string[] = []
+    const clock = world(on, opened, {}, subjects, { files: peers(), listed })
+    // Nobody at the screen: convo opens no pane of its own
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    expect(opened).toEqual([])
+    await clock.advance(30_000)
+    expect(scans(listed)).toBe(0)
+    // Drawn anyway (the person's /pane, a reload that kept it): the render says it is open
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await clock.advance(30_000)
+    expect(scans(listed)).toBeGreaterThan(0)
+    expect((await ui.find({ key: 'tab-live' }))?.text).toBe('Live (1)')
+    await ui.unmount()
+  })
+
   test('with no pane open nothing is scanned', async ($, on) => {
     const listed: string[] = []
     const clock = world(on, [], {}, subjects, { files: peers(), listed })

@@ -845,7 +845,7 @@ export const register: Register = (on, options) => {
     }
     await saveLedger($)
     // Beside the chat on a wide enough screen, unless the person closed it; asking Claude brings it back
-    if (e.isInteractive && (await $.store.get('pane-closed')) !== true) void $.ui.open({ id: PANE, title: 'convo' }).then(r => { paneOpen = r.isPlaced })
+    if (e.isInteractive && (await $.store.get('pane-closed')) !== true) void $.ui.open({ id: PANE, title: 'convo' }).then(r => { paneOpen = r.isPlaced }).catch(() => undefined)
     clearingOff = e.isInteractive ? '' : 'a plugin cannot start a compaction outside an interactive session'
     return next(e)
   })
@@ -883,6 +883,8 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (!S.active) return next(e)
+    // Drawn, however it was opened (convo's own open, the person's, a reload): the Live tab's scans run
+    paneOpen = true
     const { Box, Text, Button } = $.ui.resolve(e)
     let view = (await $.state.get(VIEW)).value
     const tokens = (await $.state.get(LEDGER)).value
