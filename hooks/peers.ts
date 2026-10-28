@@ -2,8 +2,9 @@
 // what they last did, and the Claude Code chats convo has not recorded at all.
 
 import type { Io } from './io.ts'
-import { git } from './git.ts'
-import { GONE_MS, isInside, isPeer, isUnseenHead, ordered, parseBeat, relName, type Beat, type Peer } from './live.ts'
+import { git, readFiles } from './git.ts'
+import { mask } from './redact.ts'
+import { GONE_MS, isInside, isPeer, isUnseenHead, ordered, parseBeat, peersText, relName, type Beat, type Peer } from './live.ts'
 import type { ConvoLive } from '../types/index.d.ts'
 
 /** What each project folder's `cwd` file said, kept for the life of the process: it is written once. */
@@ -135,4 +136,50 @@ export async function collectLive(io: Io, o: { home: string; coordCwd: string; s
     working,
     at: o.now,
   }
+}
+
+/** The longest a turn file is shown whole in the peers tool. */
+const TURN_CUT = 4_000
+
+/**
+ * The peers tool. Without `chat`, every live chat with its last turns and files, the folders in use and the
+ * chats convo does not record. With `chat` (a folder as the list names it, or a session id prefix) that
+ * chat's last `turns` turn files, read from its own repo.
+ */
+export async function peersTool(io: Io, input: { chat?: unknown; turns?: unknown }, o: { home: string; coordCwd: string; selfSid: string; projectsDir: string; now?: number }): Promise<string> {
+  const now = o.now ?? Date.now()
+  const { peers, known } = await scanPeers(io, { ...o, now })
+  const chat = typeof input.chat === 'string' ? input.chat.trim() : ''
+  if (!chat) {
+    // unseenCount does not leave a chat out by itself: its own transcript is fresh and may have no heartbeat file yet
+    known.add(o.selfSid)
+    const [subjects, unseen] = await Promise.all([
+      Promise.all(peers.map(p => peerSubjects(io, p, 5))),
+      unseenCount(io, { projectsDir: o.projectsDir, coordCwd: o.coordCwd, known, now }),
+    ])
+    const details = new Map(peers.map((p, i) => [p.sid, subjects[i] ?? { subjects: [], files: [] }]))
+    return mask(peersText({ coordCwd: o.coordCwd, peers, details, unseen, now }))
+  }
+  const want = chat.toLowerCase()
+  const name = (p: Peer): string => relName(o.coordCwd, p.cwd)
+  const live = peers.map(p => `${name(p)} (${p.sid.slice(0, 8)})`).join(', ') || 'none'
+  const byFolder = peers.filter(p => name(p).toLowerCase() === want || p.cwd === chat)
+  const found = byFolder.length ? byFolder : peers.filter(p => p.sid.toLowerCase().startsWith(want))
+  const peer = found[0]
+  if (!peer) return `No live chat matches "${chat.slice(0, 80)}". Live here: ${live}.`
+  if (found.length > 1) return `Several live chats match "${chat.slice(0, 80)}": ${found.map(p => `${name(p)} (${p.sid.slice(0, 8)})`).join(', ')}. Name one by its session id prefix.`
+  const asked = Math.trunc(Number(input.turns ?? 5))
+  const n = Number.isFinite(asked) ? Math.min(Math.max(asked, 1), 20) : 5
+  const ref = `refs/heads/session/${peer.sid}`
+  const label = `${name(peer)} (${peer.sid.slice(0, 8)})`
+  const ls = await git(io, ['ls-tree', '--name-only', ref, 'turns/'], { cwd: '/' }, peer.repo)
+  const names = ls.ok && ls.out ? ls.out.split('\n').slice(-n) : []
+  if (!names.length) return `${label} has no turns recorded yet.`
+  const texts = await readFiles(io, names.map(f => `${ref}:${f}`), peer.repo, { cwd: '/' })
+  const parts = names.map(f => {
+    const text = texts.get(`${ref}:${f}`)
+    if (text === undefined) return `--- ${f} ---\n(could not be read)`
+    return `--- ${f} ---\n${text.length > TURN_CUT ? `${text.slice(0, TURN_CUT)}\n… [${text.length - TURN_CUT} more chars]` : text}`
+  })
+  return mask(`${label}: its last ${names.length} turn${names.length === 1 ? '' : 's'}\n\n${parts.join('\n\n')}`)
 }

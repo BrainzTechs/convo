@@ -134,3 +134,42 @@ export function isUnseenHead(head: string, coordCwd: string): { sid: string } | 
   }
   return undefined
 }
+
+/** How long, short, as the peers text says it: "41s", "3m", "2h", "1d". */
+const lasted = (ms: number): string => {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86_400) return `${Math.floor(s / 3600)}h`
+  return `${Math.floor(s / 86_400)}d`
+}
+
+/**
+ * What the peers tool tells Claude: a block for each live chat (where it runs, working or idle and for how
+ * long, its prompt, its newest 3 turn subjects, the files it touched), the folders in use, and how many
+ * chats here convo does not record. Folders are named from the coordinator, as the Live tab names them.
+ */
+export function peersText(o: { coordCwd: string; peers: Peer[]; details: Map<string, { subjects: string[]; files: string[] }>; unseen: number; now: number }): string {
+  const lines: string[] = []
+  for (const p of o.peers) {
+    const b = p.beat
+    const state = b?.state === 'working' || b?.state === 'idle' ? `${b.state} ${lasted(o.now - b.since)}` : 'alive'
+    lines.push(`${relName(o.coordCwd, p.cwd)}  ${p.sid.slice(0, 8)}  ${state}`)
+    if (b?.prompt) lines.push(`  Prompt: ${b.prompt.length > 300 ? `${b.prompt.slice(0, 299)}…` : b.prompt}`)
+    const d = o.details.get(p.sid)
+    const subjects = d?.subjects.slice(0, 3) ?? []
+    if (subjects.length) lines.push('  Last turns:', ...subjects.map(s => `    ${s}`))
+    const files = d?.files ?? []
+    if (files.length) lines.push(`  Files: ${files.slice(0, 12).join(', ')}${files.length > 12 ? ` (+${files.length - 12} more)` : ''}`)
+    lines.push('')
+  }
+  if (!o.peers.length) lines.push('No other chats are running here right now.', '')
+  const used = [...new Set(o.peers.flatMap(p => [relName(o.coordCwd, p.cwd), ...(p.beat?.holds ?? []).map(h => relName(o.coordCwd, h))]))]
+  const unknown = o.peers.flatMap(p => {
+    const n = p.beat?.holdsUnknown ?? 0
+    return n > 0 ? [`(and possibly any worktree under ${relName(o.coordCwd, p.cwd)}: ${n} ${n === 1 ? 'subagent' : 'subagents'} with a worktree)`] : []
+  })
+  lines.push(`In use: ${used.length ? [used.join(', '), ...unknown].join(' ') : 'nothing'}`)
+  if (o.unseen > 0) lines.push(o.unseen === 1 ? "1 chat here isn't recorded by convo." : `${o.unseen} chats here aren't recorded by convo.`)
+  return lines.join('\n')
+}

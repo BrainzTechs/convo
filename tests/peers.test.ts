@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Io } from '../hooks/io.ts'
-import { beatText, type Beat, type Peer } from '../hooks/live.ts'
+import { beatText, peersText, type Beat, type Peer } from '../hooks/live.ts'
 import { git, readFiles } from '../hooks/git.ts'
-import { collectLive, peerSubjects, scanPeers, unseenCount } from '../hooks/peers.ts'
+import { collectLive, peersTool, peerSubjects, scanPeers, unseenCount } from '../hooks/peers.ts'
 import { S } from '../hooks/state.ts'
 
 const NOW = 1792913206856
@@ -342,5 +342,153 @@ describe('git on another project\'s repo', () => {
     } finally {
       S.repo = ''
     }
+  })
+})
+
+describe('git readFiles from another repo', () => {
+  test('cwd is set only when asked, for the batch read and for the one-by-one fallback', async () => {
+    const run = (): { exitCode: number } => ({ exitCode: 1 })
+    const plain = fakeIo({}, run)
+    await readFiles(plain.io, ['abc:turns/1.md'], '/theirs/repo.git')
+    expect(plain.calls.map(c => c.opts)).toEqual([{ timeoutMs: 30_000, stdin: 'abc:turns/1.md\n' }, { timeoutMs: 20_000 }])
+    const rooted = fakeIo({}, run)
+    await readFiles(rooted.io, ['abc:turns/1.md'], '/theirs/repo.git', { cwd: '/' })
+    expect(rooted.calls.map(c => c.opts)).toEqual([{ timeoutMs: 30_000, stdin: 'abc:turns/1.md\n', cwd: '/' }, { timeoutMs: 20_000, cwd: '/' }])
+  })
+})
+
+describe('the peers text', () => {
+  const peer = (sid: string, cwd: string, b?: Partial<Beat>): Peer => ({ sid, cwd, repo: `/r/${sid}/repo.git`, mtimeMs: NOW - 2_000, ...(b ? { beat: beat(b) } : {}) })
+  const none = new Map<string, { subjects: string[]; files: string[] }>()
+
+  test('a block per chat: folder, id prefix, state and age, prompt, up to 3 subjects, files', () => {
+    const text = peersText({
+      coordCwd: COORD,
+      peers: [
+        peer(A, `${COORD}/backend`, { state: 'working', since: NOW - 180_000, prompt: 'migrate payments repo to sqlc' }),
+        peer(B, `${COORD}/frontend`, { state: 'idle', since: NOW - 720_000, prompt: 'checkout form validation' }),
+      ],
+      details: new Map([[A, { subjects: ['turn 4: a', 'turn 3: b', 'turn 2: c', 'turn 1: d'], files: ['db/sqlc.yaml', 'db/query.sql'] }]]),
+      unseen: 0,
+      now: NOW,
+    })
+    expect(text).toContain('backend  b2c1d0ff  working 3m')
+    expect(text).toContain('frontend  c3d2e1f0  idle 12m')
+    expect(text).toContain('migrate payments repo to sqlc')
+    expect(text).toContain('turn 4: a')
+    expect(text).toContain('turn 2: c')
+    expect(text).not.toContain('turn 1: d')
+    expect(text).toContain('db/sqlc.yaml, db/query.sql')
+    expect(text.indexOf('backend  b2c1d0ff')).toBeLessThan(text.indexOf('frontend  c3d2e1f0'))
+  })
+
+  test('a chat without a beat is alive, and the coordinator\'s own folder is "."', () => {
+    const text = peersText({ coordCwd: COORD, peers: [peer(A, COORD)], details: none, unseen: 0, now: NOW })
+    expect(text).toContain('.  b2c1d0ff  alive')
+  })
+
+  test('the closing line lists every folder in use, and the subagent worktrees whose place is unknown', () => {
+    const peers = [
+      peer(A, `${COORD}/backend`, { holdsUnknown: 1 }),
+      peer(B, `${COORD}/frontend`, { holds: [`${COORD}/backend/.claude/worktrees/agent-a1b2`] }),
+    ]
+    const text = peersText({ coordCwd: COORD, peers, details: none, unseen: 0, now: NOW })
+    expect(text).toContain('In use: backend, frontend, backend/wt agent-a1b2 (and possibly any worktree under backend: 1 subagent with a worktree)')
+    const two = peersText({ coordCwd: COORD, peers: [peer(A, `${COORD}/backend`, { holdsUnknown: 2 })], details: none, unseen: 0, now: NOW })
+    expect(two).toContain('(and possibly any worktree under backend: 2 subagents with a worktree)')
+  })
+
+  test('chats convo does not record are counted; nothing live says so', () => {
+    expect(peersText({ coordCwd: COORD, peers: [peer(A, `${COORD}/backend`)], details: none, unseen: 2, now: NOW })).toContain("2 chats here aren't recorded by convo")
+    expect(peersText({ coordCwd: COORD, peers: [peer(A, `${COORD}/backend`)], details: none, unseen: 1, now: NOW })).toContain("1 chat here isn't recorded by convo")
+    expect(peersText({ coordCwd: COORD, peers: [peer(A, `${COORD}/backend`)], details: none, unseen: 0, now: NOW })).not.toContain('recorded by convo')
+    const empty = peersText({ coordCwd: COORD, peers: [], details: none, unseen: 0, now: NOW })
+    expect(empty).toContain('No other chats are running here')
+    expect(empty).toContain('In use: nothing')
+  })
+})
+
+describe('the peers tool', () => {
+  const F_BACK = '-Users-illusionist-Documents-projects-brainztechs-momopay-backend-aaaa1111'
+  const F_FRONT = '-Users-illusionist-Documents-projects-brainztechs-momopay-frontend-bbbb2222'
+  const US = '\x1f'
+  const PROJECTS = `${HOME}/.claude/projects`
+  const world: Record<string, File> = {
+    [`${folder(F_BACK)}/cwd`]: { text: `${COORD}/backend\n`, mtimeMs: 1 },
+    [`${folder(F_BACK)}/alive/${A}`]: { text: beatText(beat({ state: 'working', since: NOW - 180_000, prompt: 'migrate payments repo to sqlc' })), mtimeMs: NOW - 4_000 },
+    [`${folder(F_FRONT)}/cwd`]: { text: `${COORD}/frontend\n`, mtimeMs: 1 },
+    [`${folder(F_FRONT)}/alive/${B}`]: { text: beatText(beat({ state: 'idle', since: NOW - 720_000, prompt: 'checkout form validation' })), mtimeMs: NOW - 4_000 },
+  }
+  const c = { home: HOME, coordCwd: COORD, selfSid: ME, projectsDir: PROJECTS, now: NOW }
+  const turnNames = Array.from({ length: 8 }, (_, i) => `turns/${String(i + 1).padStart(4, '0')}-x.md`)
+  const gitRun = (argv: string[]): { exitCode: number; stdout?: string } => {
+    if (argv.includes('ls-tree')) return { exitCode: 0, stdout: turnNames.join('\n') + '\n' }
+    if (argv.includes('log')) return { exitCode: 0, stdout: `turn 8: last${US}a.go\n` }
+    if (argv.includes('show')) return { exitCode: 0, stdout: `FILE ${argv.at(-1)}` + 'z'.repeat(5000) }
+    return { exitCode: 1 }
+  }
+
+  test('with no chat it lists every live chat, with the numbers', async () => {
+    const { io } = fakeIo(world, gitRun)
+    const text = await peersTool(io, {}, c)
+    expect(text).toContain('backend  b2c1d0ff')
+    expect(text).toContain('frontend  c3d2e1f0')
+    expect(text).toContain('turn 8: last')
+    expect(text).toContain('In use: backend, frontend')
+  })
+
+  test('each peer\'s git is asked at once', async () => {
+    let inFlight = 0
+    let most = 0
+    const { io } = fakeIo(world, () => ({ exitCode: 0 }))
+    const run = io.process.run
+    io.process.run = async (argv, opts) => {
+      inFlight++
+      most = Math.max(most, inFlight)
+      for (let i = 0; i < 30; i++) await Promise.resolve()
+      inFlight--
+      return run(argv, opts)
+    }
+    await peersTool(io, {}, c)
+    expect(most).toBe(2)
+  })
+
+  test('a chat by folder reads its last 5 turn files from its own repo, each cut to 4,000 characters', async () => {
+    const { io, calls } = fakeIo(world, gitRun)
+    const text = await peersTool(io, { chat: 'backend' }, c)
+    const ls = calls.find(x => x.argv.includes('ls-tree'))
+    expect(ls?.argv).toEqual(['git', `--git-dir=${folder(F_BACK)}/repo.git`, 'ls-tree', '--name-only', `refs/heads/session/${A}`, 'turns/'])
+    expect(ls?.opts.cwd).toBe('/')
+    expect(calls.filter(x => x.argv.includes('cat-file')).every(x => x.opts.cwd === '/' && x.argv[1] === `--git-dir=${folder(F_BACK)}/repo.git`)).toBe(true)
+    for (const n of [4, 5, 6, 7, 8]) expect(text).toContain(`turns/000${n}-x.md`)
+    expect(text).not.toContain('turns/0003-x.md')
+    expect(text).not.toContain('z'.repeat(4001))
+    expect(text).toContain('z'.repeat(3000))
+  })
+
+  test('a chat by session id prefix, and turns is clamped to 1..20', async () => {
+    const { io } = fakeIo(world, gitRun)
+    const two = await peersTool(io, { chat: 'c3d2', turns: 2 }, c)
+    expect(two).toContain('turns/0008-x.md')
+    expect(two).toContain('turns/0007-x.md')
+    expect(two).not.toContain('turns/0006-x.md')
+    const lots = await peersTool(io, { chat: 'c3d2e1f0', turns: 99 }, c)
+    expect(lots).toContain('turns/0001-x.md') // 8 turns exist, 20 is the most asked for
+    const one = await peersTool(io, { chat: 'c3d2e1f0', turns: 0 }, c)
+    expect(one).toContain('turns/0008-x.md')
+    expect(one).not.toContain('turns/0007-x.md')
+  })
+
+  test('a chat that is not live names who is', async () => {
+    const { io } = fakeIo(world, gitRun)
+    const text = await peersTool(io, { chat: 'nowhere' }, c)
+    expect(text).toContain('No live chat matches "nowhere". Live here:')
+    expect(text).toContain('backend (b2c1d0ff)')
+    expect(text).toContain('frontend (c3d2e1f0)')
+  })
+
+  test('a chat with no turns recorded says so', async () => {
+    const { io } = fakeIo(world, argv => (argv.includes('ls-tree') ? { exitCode: 128 } : { exitCode: 1 }))
+    expect(await peersTool(io, { chat: 'backend' }, c)).toContain('has no turns recorded')
   })
 })

@@ -46,7 +46,7 @@ import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
 import { withTrailers } from './lineage.ts'
 import { decideActive, parseExclude } from './live.ts'
-import { collectLive } from './peers.ts'
+import { collectLive, peersTool } from './peers.ts'
 
 /**
  * The engine as convo's modules use it. Claude Code follows `$` only into
@@ -967,8 +967,8 @@ export const register: Register = (on, options) => {
   // Claude Code's own permission step is reached, so convo asks here itself: reading this branch's own history
   // needs nothing; reading other sessions' history, listing them, and merging (which writes records and calls a
   // model) wait for the person, so an instruction injected into a turn cannot quietly pull another conversation in.
-  // One hook serves all four; a registered tool's arguments arrive on the event itself, beside `tool`
-  on('tool.call', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__pane', 'mcp__convo__context'] }, async ($, e, next) => {
+  // One hook serves all of them; a registered tool's arguments arrive on the event itself, beside `tool`
+  on('tool.call', { tool: ['mcp__convo__recall', 'mcp__convo__turn', 'mcp__convo__branches', 'mcp__convo__merge', 'mcp__convo__pane', 'mcp__convo__context', 'mcp__convo__peers'] }, async ($, e, next) => {
     if (!S.active) return next(e)
     if (e.tool === 'mcp__convo__context') return { result: await contextTool($, e as { readonly [k: string]: unknown }) }
     // Showing the pane reads nothing beyond what the person sees: no permission, and it works with history off
@@ -987,6 +987,7 @@ export const register: Register = (on, options) => {
       if (e.tool === 'mcp__convo__recall') return { result: await recall(ioOf($), input) }
       if (e.tool === 'mcp__convo__turn') return { result: await readTurn(ioOf($), input) }
       if (e.tool === 'mcp__convo__branches') return { result: await branchList(ioOf($)) }
+      if (e.tool === 'mcp__convo__peers') return { result: await peersTool(ioOf($), input, { home: liveHome, coordCwd: S.cwd, selfSid: S.sid, projectsDir: S.projectsDir }) }
       return { result: await mergeBranch(ioOf($), input) }
     } catch (err) {
       return { result: `convo could not do that: ${String(err).slice(0, 300)}` }

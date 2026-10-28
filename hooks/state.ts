@@ -87,7 +87,7 @@ export const resumed = new Set<string>()
 export const resume = { pending: false }
 
 /** The full names the tools were registered under (mcp__<plugin>__<name>). */
-export const toolNames = { recall: 'mcp__convo__recall', turn: 'mcp__convo__turn', branches: 'mcp__convo__branches', merge: 'mcp__convo__merge', pane: 'mcp__convo__pane', context: 'mcp__convo__context' }
+export const toolNames = { recall: 'mcp__convo__recall', turn: 'mcp__convo__turn', branches: 'mcp__convo__branches', merge: 'mcp__convo__merge', pane: 'mcp__convo__pane', context: 'mcp__convo__context', peers: 'mcp__convo__peers' }
 
 /** Runs `fn` after every earlier history rewrite (keyframe, merge) has settled. */
 export function exclusive<T>(fn: () => Promise<T>): Promise<T> {
