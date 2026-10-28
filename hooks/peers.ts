@@ -63,7 +63,7 @@ export async function scanPeers(io: Io, o: { home: string; coordCwd: string; sel
 export async function peerSubjects(io: Io, p: Peer, n: number): Promise<{ subjects: string[]; files: string[] }> {
   const none = { subjects: [], files: [] }
   try {
-    const r = await git(io, ['log', '-n', String(n), '--format=%s%x1f%(trailers:key=Files,valueonly,separator=%x2c)', `refs/heads/session/${p.sid}`], { cwd: '/' }, p.repo)
+    const r = await git(io, ['log', '--first-parent', '-n', String(n), '--format=%s%x1f%(trailers:key=Files,valueonly,separator=%x2c)', `refs/heads/session/${p.sid}`], { cwd: '/' }, p.repo)
     if (!r.ok) return none
     const subjects: string[] = []
     const files = new Set<string>()

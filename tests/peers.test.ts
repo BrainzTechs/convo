@@ -157,8 +157,17 @@ describe('what a peer has been doing', () => {
     expect(r.subjects).toEqual(['turn 3: add the sqlc config', 'turn 2: read the schema', 'turn 1: hello'])
     expect(r.files).toEqual(['db/sqlc.yaml', 'db/query.sql', 'db/schema.sql'])
     expect(calls.length).toBe(1)
-    expect(calls[0]?.argv).toEqual(['git', `--git-dir=/r/${A}/repo.git`, 'log', '-n', '3', '--format=%s%x1f%(trailers:key=Files,valueonly,separator=%x2c)', `refs/heads/session/${A}`])
+    expect(calls[0]?.argv).toEqual(['git', `--git-dir=/r/${A}/repo.git`, 'log', '--first-parent', '-n', '3', '--format=%s%x1f%(trailers:key=Files,valueonly,separator=%x2c)', `refs/heads/session/${A}`])
     expect(calls[0]?.opts).toEqual({ cwd: '/', timeoutMs: 20_000 })
+  })
+
+  test('the log follows the session branch only, so merged subagent turns are not the peer\'s own', async () => {
+    const { io, calls } = fakeIo({}, () => ({ exitCode: 0, stdout: '' }))
+    await peerSubjects(io, peer(A), 5)
+    const argv = calls[0]?.argv ?? []
+    expect(argv).toContain('--first-parent')
+    expect(argv).toContain(`refs/heads/session/${A}`)
+    expect(argv).toContain(`--git-dir=/r/${A}/repo.git`)
   })
 
   test('a git log that fails leaves that peer empty and the next peer unaffected', async () => {
