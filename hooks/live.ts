@@ -147,7 +147,7 @@ const lasted = (ms: number): string => {
 /**
  * What the peers tool tells Claude: a block for each live chat (where it runs, working or idle and for how
  * long, its prompt, its newest 3 turn subjects, the files it touched), the folders in use, and how many
- * chats here convo does not record. Folders are named from the coordinator, as the Live tab names them.
+ * chats here convo does not record. Each block names its folder from the coordinator, as the Live tab does; the folders in use are absolute paths.
  */
 export function peersText(o: { coordCwd: string; peers: Peer[]; details: Map<string, { subjects: string[]; files: string[] }>; unseen: number; now: number }): string {
   const lines: string[] = []
@@ -164,10 +164,11 @@ export function peersText(o: { coordCwd: string; peers: Peer[]; details: Map<str
     lines.push('')
   }
   if (!o.peers.length) lines.push('No other chats are running here right now.', '')
-  const used = [...new Set(o.peers.flatMap(p => [relName(o.coordCwd, p.cwd), ...(p.beat?.holds ?? []).map(h => relName(o.coordCwd, h))]))]
+  // Absolute paths here: Claude sets them against `git worktree list` to say what can be removed
+  const used = [...new Set(o.peers.flatMap(p => [p.cwd, ...(p.beat?.holds ?? [])]))]
   const unknown = o.peers.flatMap(p => {
     const n = p.beat?.holdsUnknown ?? 0
-    return n > 0 ? [`(and possibly any worktree under ${relName(o.coordCwd, p.cwd)}: ${n} ${n === 1 ? 'subagent' : 'subagents'} with a worktree)`] : []
+    return n > 0 ? [`(and possibly any worktree under ${p.cwd}: ${n} ${n === 1 ? 'subagent' : 'subagents'} with a worktree)`] : []
   })
   lines.push(`In use: ${used.length ? [used.join(', '), ...unknown].join(' ') : 'nothing'}`)
   if (o.unseen > 0) lines.push(o.unseen === 1 ? "1 chat here isn't recorded by convo." : `${o.unseen} chats here aren't recorded by convo.`)

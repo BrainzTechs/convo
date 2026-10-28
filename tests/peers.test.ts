@@ -393,9 +393,9 @@ describe('the peers text', () => {
       peer(B, `${COORD}/frontend`, { holds: [`${COORD}/backend/.claude/worktrees/agent-a1b2`] }),
     ]
     const text = peersText({ coordCwd: COORD, peers, details: none, unseen: 0, now: NOW })
-    expect(text).toContain('In use: backend, frontend, backend/wt agent-a1b2 (and possibly any worktree under backend: 1 subagent with a worktree)')
+    expect(text).toContain(`In use: ${COORD}/backend, ${COORD}/frontend, ${COORD}/backend/.claude/worktrees/agent-a1b2 (and possibly any worktree under ${COORD}/backend: 1 subagent with a worktree)`)
     const two = peersText({ coordCwd: COORD, peers: [peer(A, `${COORD}/backend`, { holdsUnknown: 2 })], details: none, unseen: 0, now: NOW })
-    expect(two).toContain('(and possibly any worktree under backend: 2 subagents with a worktree)')
+    expect(two).toContain(`(and possibly any worktree under ${COORD}/backend: 2 subagents with a worktree)`)
   })
 
   test('chats convo does not record are counted; nothing live says so', () => {
@@ -434,7 +434,7 @@ describe('the peers tool', () => {
     expect(text).toContain('backend  b2c1d0ff')
     expect(text).toContain('frontend  c3d2e1f0')
     expect(text).toContain('turn 8: last')
-    expect(text).toContain('In use: backend, frontend')
+    expect(text).toContain(`In use: ${COORD}/backend, ${COORD}/frontend`)
   })
 
   test('each peer\'s git is asked at once', async () => {
