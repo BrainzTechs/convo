@@ -5,10 +5,10 @@ import { parseTurnFile, type TurnDoc } from './checkpoint.ts'
 import { S } from './state.ts'
 
 /** `gitDir` is this project's repo unless a caller reads another's (a peer's history). */
-export async function git(io: Io, args: string[], init: { stdin?: string; env?: Record<string, string>; cwd?: string } = {}, gitDir = S.repo): Promise<{ ok: boolean; out: string; err: string; cut?: true }> {
+export async function git(io: Io, args: string[], init: { stdin?: string; env?: Record<string, string>; cwd?: string } = {}, gitDir = S.repo): Promise<{ ok: boolean; code: number; out: string; err: string; cut?: true }> {
   const r = await io.process.run(['git', `--git-dir=${gitDir}`, ...args], { timeoutMs: 20_000, ...init })
   // Output past the 4 MiB a process returns is cut: callers that list or search say so instead of trusting it
-  return { ok: r.exitCode === 0, out: r.stdout.trim(), err: r.stderr.trim(), ...(r.isStdoutTruncated ? { cut: true as const } : {}) }
+  return { ok: r.exitCode === 0, code: r.exitCode, out: r.stdout.trim(), err: r.stderr.trim(), ...(r.isStdoutTruncated ? { cut: true as const } : {}) }
 }
 
 export const utf8 = new TextEncoder()

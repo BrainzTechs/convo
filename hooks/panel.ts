@@ -208,7 +208,8 @@ export function liveNodes(live: ConvoLive | undefined, ui: ConvoUi, width: numbe
     out.push({ t: 'button', key: `peer-${p.sid}`, text: fit(`${open ? '▾ ' : ''}${fit(p.name, nameW).padEnd(nameW)}  ${(states[i] ?? '').padEnd(stateW)}  ${said}`.trimEnd(), width), tone: p.state === 'working' ? undefined : 'dim', action: { kind: 'toggle', id: `peer:${p.sid}` } })
     if (!open) continue
     for (const s of p.subjects) out.push({ t: 'text', text: fit(`    · ${s}`, width), tone: 'dim' })
-    if (!p.subjects.length) out.push({ t: 'text', text: '    no turns recorded yet', tone: 'dim' })
+    if (p.failed) out.push({ t: 'text', text: '    could not be read (git failed)', tone: 'dim' })
+    else if (!p.subjects.length) out.push({ t: 'text', text: '    no turns recorded yet', tone: 'dim' })
   }
   if (!peers.length) out.push({ t: 'text', text: 'No other chats running inside this folder.', tone: 'dim' })
   if (live?.unseen) out.push({ t: 'text', text: fit(`${live.unseen} chat${live.unseen === 1 ? '' : 's'} here ${live.unseen === 1 ? "isn't" : "aren't"} recorded by convo`, width), tone: 'dim' })

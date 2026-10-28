@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Io } from '../hooks/io.ts'
-import { beatText, peersText, type Beat, type Peer } from '../hooks/live.ts'
+import { beatText, inUse, peersText, usage, type Beat, type Peer } from '../hooks/live.ts'
 import { git, readFiles } from '../hooks/git.ts'
-import { collectLive, peersTool, peerSubjects, scanPeers, unseenCount } from '../hooks/peers.ts'
+import { collectLive, peersTool, peerSubjects, scanPeers, unseenChats, unseenCount } from '../hooks/peers.ts'
 import { S } from '../hooks/state.ts'
 
 const NOW = 1792913206856
@@ -170,19 +170,27 @@ describe('what a peer has been doing', () => {
     expect(argv).toContain(`--git-dir=/r/${A}/repo.git`)
   })
 
-  test('a git log that fails leaves that peer empty and the next peer unaffected', async () => {
-    const { io } = fakeIo({}, argv =>
-      argv.includes(`--git-dir=/r/${A}/repo.git`) ? { exitCode: 128, stderr: "fatal: ambiguous argument 'refs/heads/session/x'" } : { exitCode: 0, stdout: `turn 1: hi${US}a.go\n` },
-    )
+  test('a branch git says is not there leaves that peer empty (nothing recorded yet), and the next peer unaffected', async () => {
+    const { io, calls } = fakeIo({}, argv => {
+      if (!argv.includes(`--git-dir=/r/${A}/repo.git`)) return { exitCode: 0, stdout: `turn 1: hi${US}a.go\n` }
+      // rev-parse --verify -q: exit 1 and nothing said is a ref that does not exist
+      return argv.includes('rev-parse') ? { exitCode: 1 } : { exitCode: 128, stderr: "fatal: ambiguous argument 'refs/heads/session/x'" }
+    })
     expect(await peerSubjects(io, peer(A), 3)).toEqual({ subjects: [], files: [] })
+    expect(calls.at(-1)?.argv).toEqual(['git', `--git-dir=/r/${A}/repo.git`, 'rev-parse', '--verify', '-q', `refs/heads/session/${A}`])
     expect(await peerSubjects(io, peer(B), 3)).toEqual({ subjects: ['turn 1: hi'], files: ['a.go'] })
   })
 
-  test('a process that throws is the same as one that fails', async () => {
+  test('a git that fails some other way (a broken repo) is "failed", never "nothing recorded"', async () => {
+    const { io } = fakeIo({}, () => ({ exitCode: 128, stderr: 'fatal: not a git repository' }))
+    expect(await peerSubjects(io, peer(A), 3)).toEqual({ subjects: [], files: [], failed: true })
+  })
+
+  test('a process that throws (a timeout) is "failed" too', async () => {
     const { io } = fakeIo({}, () => {
-      throw new Error('spawn failed')
+      throw new Error('timed out')
     })
-    expect(await peerSubjects(io, peer(A), 3)).toEqual({ subjects: [], files: [] })
+    expect(await peerSubjects(io, peer(A), 3)).toEqual({ subjects: [], files: [], failed: true })
   })
 })
 
@@ -490,5 +498,129 @@ describe('the peers tool', () => {
   test('a chat with no turns recorded says so', async () => {
     const { io } = fakeIo(world, argv => (argv.includes('ls-tree') ? { exitCode: 128 } : { exitCode: 1 }))
     expect(await peersTool(io, { chat: 'backend' }, c)).toContain('has no turns recorded')
+  })
+
+  test('a chat whose git fails, or times out, says it could not be read, never that it recorded nothing', async () => {
+    const broken = fakeIo(world, argv => (argv.includes('ls-tree') || argv.includes('rev-parse') ? { exitCode: 128 } : { exitCode: 1 }))
+    const text = await peersTool(broken.io, { chat: 'backend' }, c)
+    expect(text).toBe('backend (b2c1d0ff): its turns could not be read (git failed).')
+    expect(broken.calls.some(x => x.argv.includes('rev-parse'))).toBe(true)
+    const slow = fakeIo(world, argv => {
+      if (argv.includes('ls-tree')) throw new Error('timed out')
+      return { exitCode: 1 }
+    })
+    expect(await peersTool(slow.io, { chat: 'backend' }, c)).toContain('could not be read (git failed)')
+  })
+
+  test('a peer whose log fails reads "could not be read (git failed)" in the list', async () => {
+    const { io } = fakeIo(world, argv => (argv[0] === 'git' ? { exitCode: 128, stderr: 'fatal: not a git repository' } : { exitCode: 1 }))
+    const text = await peersTool(io, {}, c)
+    expect(text).toContain('backend  b2c1d0ff')
+    expect(text).toContain('  Last turns: could not be read (git failed)')
+  })
+})
+
+describe('the final fix wave', () => {
+  const PROJECTS = `${HOME}/.claude/projects`
+  const F = '-Users-illusionist-Documents-projects-brainztechs-momopay-backend-aaaa1111'
+  const DIR = '-Users-illusionist-Documents-projects-brainztechs-momopay-backend'
+  const DIR2 = '-Users-illusionist-Documents-projects-brainztechs-momopay-frontend'
+  const U1 = 'd4e3f2a1-3333-4444-8555-666677778888'
+  const U2 = 'e5f4a3b2-4444-4555-8666-777788889999'
+  const head = (sid: string, cwd: string) => JSON.stringify({ entrypoint: 'cli', cwd, sessionId: sid }) + '\n'
+
+  test('this chat and another in one alive folder: only the other is a peer', async () => {
+    const { io } = fakeIo({
+      [`${folder(F)}/cwd`]: { text: `${COORD}/backend\n`, mtimeMs: 1 },
+      [`${folder(F)}/alive/${ME}`]: { text: beatText(beat({ state: 'working' })), mtimeMs: NOW - 1_000 },
+      [`${folder(F)}/alive/${A}`]: { text: beatText(beat({ state: 'idle' })), mtimeMs: NOW - 1_000 },
+    })
+    const r = await scanPeers(io, o)
+    expect(r.peers.map(p => p.sid)).toEqual([A])
+    expect([...r.known].sort()).toEqual([A, ME].sort())
+  })
+
+  test('the scan takes each heartbeat file\'s time from the listing: no stat per file', async () => {
+    const { io, stats } = fakeIo({
+      [`${folder(F)}/cwd`]: { text: `${COORD}/backend\n`, mtimeMs: 1 },
+      [`${folder(F)}/alive/${A}`]: { text: beatText(beat()), mtimeMs: NOW - 3_000 },
+      [`${folder(F)}/alive/${B}`]: { text: beatText(beat()), mtimeMs: NOW - 200_000 },
+    })
+    const r = await scanPeers(io, o)
+    expect(r.peers.map(p => [p.sid, p.mtimeMs])).toEqual([[A, NOW - 3_000]])
+    expect(stats).toEqual([])
+  })
+
+  test('a beat\'s fields are checked: a wrong type is dropped or defaulted, and unreadable holds count as busy', async () => {
+    const bad = JSON.stringify({ v: 1, state: 'working', at: 'soon', since: null, prompt: { evil: true }, turns: 'x', interactive: 'yes', holds: '/not/an/array', holdsUnknown: -2 })
+    const mixed = JSON.stringify({ v: 1, state: 'idle', at: NOW, since: NOW - 5_000, prompt: 42, holds: ['/a', 7, null], holdsUnknown: 0 })
+    const { io } = fakeIo({
+      [`${folder(F)}/cwd`]: { text: `${COORD}/backend\n`, mtimeMs: 1 },
+      [`${folder(F)}/alive/${A}`]: { text: bad, mtimeMs: NOW - 2_000 },
+      [`${folder(F)}/alive/${B}`]: { text: mixed, mtimeMs: NOW - 2_000 },
+    })
+    const r = await scanPeers(io, o)
+    const a = r.peers.find(p => p.sid === A)?.beat
+    expect(a).toEqual({ v: 1, state: 'working', at: NOW - 2_000, since: NOW - 2_000, holdsUnknown: 1 })
+    const b = r.peers.find(p => p.sid === B)?.beat
+    expect(b).toEqual({ v: 1, state: 'idle', at: NOW, since: NOW - 5_000, holds: ['/a'], holdsUnknown: 1 })
+    // Busy, not free: a worktree under the garbled chat's folder
+    expect(inUse(`${COORD}/backend/.claude/worktrees/agent-x`, r.peers)).toBe(true)
+    // A prompt that is not text never reaches the Live tab
+    const live = await collectLive(io, { home: HOME, coordCwd: COORD, selfSid: ME, projectsDir: PROJECTS, now: NOW, full: true })
+    expect(live.peers.every(p => p.prompt === undefined)).toBe(true)
+  })
+
+  test('the chats convo does not record give their folders too, and the In use line lists them', async () => {
+    const files: Record<string, File> = {
+      [`${folder(F)}/cwd`]: { text: `${COORD}/backend\n`, mtimeMs: 1 },
+      [`${folder(F)}/alive/${A}`]: { text: beatText(beat()), mtimeMs: NOW - 2_000 },
+      [`${PROJECTS}/${DIR2}/${U1}.jsonl`]: { text: '', mtimeMs: NOW - 5_000 },
+    }
+    const run = (argv: string[]) => (argv[0] === 'head' ? { exitCode: 0, stdout: head(U1, `${COORD}/frontend`) } : { exitCode: 0, stdout: '' })
+    const { io } = fakeIo(files, run)
+    expect(await unseenChats(io, { projectsDir: PROJECTS, coordCwd: COORD, known: new Set(), now: NOW })).toEqual({ count: 1, folders: [`${COORD}/frontend`] })
+    const text = await peersTool(io, {}, { home: HOME, coordCwd: COORD, selfSid: ME, projectsDir: PROJECTS, now: NOW })
+    expect(text).toContain(`In use: ${COORD}/backend, ${COORD}/frontend`)
+    expect(text).toContain("1 chat here isn't recorded by convo.")
+    // The Live tab keeps the count
+    expect((await collectLive(io, { home: HOME, coordCwd: COORD, selfSid: ME, projectsDir: PROJECTS, now: NOW, full: true })).unseen).toBe(1)
+  })
+
+  test('one transcript whose head throws, or one folder that cannot be listed, hides none of the others', async () => {
+    const files: Record<string, File> = {
+      [`${PROJECTS}/${DIR}/${U1}.jsonl`]: { text: '', mtimeMs: NOW - 5_000 },
+      [`${PROJECTS}/${DIR}/${U2}.jsonl`]: { text: '', mtimeMs: NOW - 5_000 },
+      [`${PROJECTS}/${DIR2}/x.jsonl`]: { text: '', mtimeMs: NOW - 5_000 },
+    }
+    const { io } = fakeIo(files, argv => {
+      if ((argv[3] ?? '').includes(U1)) throw new Error('head timed out')
+      return { exitCode: 0, stdout: head(U2, `${COORD}/backend`) }
+    })
+    const list = io.fs.list
+    io.fs.list = async (dir?: string) => {
+      if (dir?.endsWith(DIR2)) throw new Error('EACCES')
+      return list(dir)
+    }
+    expect(await unseenChats(io, { projectsDir: PROJECTS, coordCwd: COORD, known: new Set(), now: NOW })).toEqual({ count: 1, folders: [`${COORD}/backend`] })
+  })
+
+  test('inUse and the In use line read one definition: every folder listed is in use, and nothing else is', () => {
+    const peers: Peer[] = [
+      { sid: A, cwd: `${COORD}/backend`, repo: '/r', mtimeMs: NOW, beat: beat({ holds: [`${COORD}/.claude/worktrees/agent-1`] }) },
+      { sid: B, cwd: `${COORD}/frontend`, repo: '/r', mtimeMs: NOW, beat: beat({ holdsUnknown: 1 }) },
+    ]
+    const unseen = [`${COORD}/infra`]
+    const u = usage(peers, unseen)
+    const text = peersText({ coordCwd: COORD, peers, details: new Map(), unseen: 1, unseenFolders: unseen, now: NOW })
+    const line = text.split('\n').find(l => l.startsWith('In use: ')) ?? ''
+    for (const f of [...u.works, ...u.holds]) {
+      expect(line).toContain(f)
+      expect(inUse(f, peers, unseen)).toBe(true)
+    }
+    expect(line).toContain(`possibly any worktree under ${COORD}/frontend`)
+    expect(inUse(`${COORD}/frontend/.claude/worktrees/agent-9`, peers, unseen)).toBe(true)
+    expect(inUse(`${COORD}/backend/.claude/worktrees/agent-9`, peers, unseen)).toBe(false)
+    expect(inUse(`${COORD}/docs`, peers, unseen)).toBe(false)
   })
 })

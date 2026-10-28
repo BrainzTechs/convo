@@ -70,6 +70,28 @@ export function parseBeat(text: string): Beat | undefined {
 
 export const beatText = (b: Beat): string => JSON.stringify(b)
 
+const finite = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
+
+/**
+ * A parsed beat with every field checked, since another process wrote it: a field of the wrong type is
+ * dropped, or defaulted (`since` and `at` to the file's time). Holds that cannot be read count as one
+ * unknown hold, so a garbled file makes the folders under that chat look busy, never free.
+ */
+export function cleanBeat(b: Beat, mtimeMs: number): Beat {
+  const raw = b as unknown as Record<string, unknown>
+  const out: Beat = { v: 1, state: b.state, at: finite(raw.at) ? raw.at : mtimeMs, since: finite(raw.since) ? raw.since : mtimeMs }
+  if (typeof raw.prompt === 'string') out.prompt = raw.prompt
+  if (finite(raw.turns)) out.turns = raw.turns
+  if (typeof raw.interactive === 'boolean') out.interactive = raw.interactive
+  let unknown = raw.holdsUnknown === undefined ? 0 : finite(raw.holdsUnknown) && raw.holdsUnknown >= 0 ? raw.holdsUnknown : 1
+  if (Array.isArray(raw.holds)) {
+    out.holds = raw.holds.filter((h): h is string => typeof h === 'string')
+    if (out.holds.length !== raw.holds.length) unknown = Math.max(unknown, 1)
+  } else if (raw.holds !== undefined) unknown = Math.max(unknown, 1)
+  if (raw.holdsUnknown !== undefined || unknown > 0) out.holdsUnknown = unknown
+  return out
+}
+
 /** Another chat running in the coordinator's folder or below it, as its heartbeat file and its project folder tell. */
 export type Peer = { sid: string; cwd: string; repo: string; mtimeMs: number; beat?: Beat }
 
@@ -100,17 +122,30 @@ export function relName(coordCwd: string, cwd: string): string {
 }
 
 /**
+ * What the live chats are using, the one definition `inUse` and the peers text both read: the folders
+ * chats work in (a live peer's, or a chat convo does not record), the folders they hold for themselves
+ * or a subagent, and the folders under which a subagent's worktree is somewhere unknown, with how many.
+ */
+export function usage(peers: readonly Peer[], unseenFolders: readonly string[] = []): { works: string[]; holds: string[]; unknownUnder: { cwd: string; n: number }[] } {
+  const works = [...new Set([...peers.map(p => p.cwd), ...unseenFolders])]
+  const holds = [...new Set(peers.flatMap(p => p.beat?.holds ?? []))]
+  const unknownUnder = peers.flatMap(p => ((p.beat?.holdsUnknown ?? 0) > 0 ? [{ cwd: p.cwd, n: p.beat?.holdsUnknown ?? 0 }] : []))
+  return { works, holds, unknownUnder }
+}
+
+/**
  * Whether a chat is using `folder`: one works in it or below it, or holds it
  * (or a folder around it) for itself or a subagent. A folder merely under a
  * chat's own folder is free unless that chat has a subagent worktree whose
  * path is unknown, which could be this one.
  */
-export function inUse(folder: string, peers: readonly Peer[]): boolean {
-  return peers.some(p => {
-    if (isInside(folder, p.cwd)) return true
-    if ((p.beat?.holds ?? []).some(h => isInside(folder, h) || isInside(h, folder))) return true
-    return isInside(p.cwd, folder) && (p.beat?.holdsUnknown ?? 0) > 0
-  })
+export function inUse(folder: string, peers: readonly Peer[], unseenFolders: readonly string[] = []): boolean {
+  const u = usage(peers, unseenFolders)
+  return (
+    u.works.some(w => isInside(folder, w)) ||
+    u.holds.some(h => isInside(folder, h) || isInside(h, folder)) ||
+    u.unknownUnder.some(x => isInside(x.cwd, folder))
+  )
 }
 
 const OUTSIDE_CONVO = new Set(['cli', 'claude-desktop'])
@@ -120,7 +155,7 @@ const OUTSIDE_CONVO = new Set(['cli', 'claude-desktop'])
  * types into (not an SDK run) inside `coordCwd`. `head` is cut at a byte
  * limit, so a last line may be torn: a line that does not parse is skipped.
  */
-export function isUnseenHead(head: string, coordCwd: string): { sid: string } | undefined {
+export function isUnseenHead(head: string, coordCwd: string): { sid: string; cwd: string } | undefined {
   for (const line of head.split('\n')) {
     let j: unknown
     try {
@@ -130,7 +165,7 @@ export function isUnseenHead(head: string, coordCwd: string): { sid: string } | 
     }
     if (typeof j !== 'object' || j === null) continue
     const { entrypoint, cwd, sessionId } = j as { entrypoint?: unknown; cwd?: unknown; sessionId?: unknown }
-    if (typeof entrypoint === 'string' && OUTSIDE_CONVO.has(entrypoint) && typeof cwd === 'string' && typeof sessionId === 'string' && isInside(coordCwd, cwd)) return { sid: sessionId }
+    if (typeof entrypoint === 'string' && OUTSIDE_CONVO.has(entrypoint) && typeof cwd === 'string' && typeof sessionId === 'string' && isInside(coordCwd, cwd)) return { sid: sessionId, cwd }
   }
   return undefined
 }
@@ -144,12 +179,16 @@ const lasted = (ms: number): string => {
   return `${Math.floor(s / 86_400)}d`
 }
 
+/** What a peer's own history said: its newest subjects and files, or that git could not read it. */
+export type PeerDetail = { subjects: string[]; files: string[]; failed?: true }
+
 /**
  * What the peers tool tells Claude: a block for each live chat (where it runs, working or idle and for how
  * long, its prompt, its newest 3 turn subjects, the files it touched), the folders in use, and how many
- * chats here convo does not record. Each block names its folder from the coordinator, as the Live tab does; the folders in use are absolute paths.
+ * chats here convo does not record. Each block names its folder from the coordinator, as the Live tab does;
+ * the folders in use are absolute paths, and take in the folders of the chats convo does not record.
  */
-export function peersText(o: { coordCwd: string; peers: Peer[]; details: Map<string, { subjects: string[]; files: string[] }>; unseen: number; now: number }): string {
+export function peersText(o: { coordCwd: string; peers: Peer[]; details: Map<string, PeerDetail>; unseen: number; unseenFolders?: readonly string[]; now: number }): string {
   const lines: string[] = []
   for (const p of o.peers) {
     const b = p.beat
@@ -157,6 +196,7 @@ export function peersText(o: { coordCwd: string; peers: Peer[]; details: Map<str
     lines.push(`${relName(o.coordCwd, p.cwd)}  ${p.sid.slice(0, 8)}  ${state}`)
     if (b?.prompt) lines.push(`  Prompt: ${b.prompt.length > 300 ? `${b.prompt.slice(0, 299)}…` : b.prompt}`)
     const d = o.details.get(p.sid)
+    if (d?.failed) lines.push('  Last turns: could not be read (git failed)')
     const subjects = d?.subjects.slice(0, 3) ?? []
     if (subjects.length) lines.push('  Last turns:', ...subjects.map(s => `    ${s}`))
     const files = d?.files ?? []
@@ -165,12 +205,10 @@ export function peersText(o: { coordCwd: string; peers: Peer[]; details: Map<str
   }
   if (!o.peers.length) lines.push('No other chats are running here right now.', '')
   // Absolute paths here: Claude sets them against `git worktree list` to say what can be removed
-  const used = [...new Set(o.peers.flatMap(p => [p.cwd, ...(p.beat?.holds ?? [])]))]
-  const unknown = o.peers.flatMap(p => {
-    const n = p.beat?.holdsUnknown ?? 0
-    return n > 0 ? [`(and possibly any worktree under ${p.cwd}: ${n} ${n === 1 ? 'subagent' : 'subagents'} with a worktree)`] : []
-  })
-  lines.push(`In use: ${used.length ? [used.join(', '), ...unknown].join(' ') : 'nothing'}`)
+  const u = usage(o.peers, o.unseenFolders ?? [])
+  const used = [...new Set([...u.works, ...u.holds])]
+  const unknown = u.unknownUnder.map(x => `(and possibly any worktree under ${x.cwd}: ${x.n} ${x.n === 1 ? 'subagent' : 'subagents'} with a worktree)`)
+  lines.push(`In use: ${used.length || unknown.length ? [used.join(', '), ...unknown].filter(Boolean).join(' ') : 'nothing'}`)
   if (o.unseen > 0) lines.push(o.unseen === 1 ? "1 chat here isn't recorded by convo." : `${o.unseen} chats here aren't recorded by convo.`)
   return lines.join('\n')
 }

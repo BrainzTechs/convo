@@ -4,7 +4,7 @@
 import type { Io } from './io.ts'
 import { git, readFiles } from './git.ts'
 import { mask } from './redact.ts'
-import { GONE_MS, isInside, isPeer, isUnseenHead, ordered, parseBeat, peersText, relName, type Beat, type Peer } from './live.ts'
+import { GONE_MS, cleanBeat, isInside, isPeer, isUnseenHead, ordered, parseBeat, peersText, relName, type Beat, type Peer, type PeerDetail } from './live.ts'
 import type { ConvoLive } from '../types/index.d.ts'
 
 /** What each project folder's `cwd` file said, kept for the life of the process: it is written once. */
@@ -12,10 +12,10 @@ const folderCwd = new Map<string, string>()
 
 const STATES: readonly string[] = ['working', 'idle', 'ended']
 
-/** A heartbeat file's beat, or none when it is the old bare timestamp, unreadable, or names a state convo does not have. */
-function readBeat(text: string): Beat | undefined {
+/** A heartbeat file's beat with its fields checked, or none when it is the old bare timestamp, unreadable, or names a state convo does not have. */
+function readBeat(text: string, mtimeMs: number): Beat | undefined {
   const b = parseBeat(text)
-  return b && STATES.includes(b.state) ? b : undefined
+  return b && STATES.includes(b.state) ? cleanBeat(b, mtimeMs) : undefined
 }
 
 /**
@@ -46,9 +46,10 @@ export async function scanPeers(io: Io, o: { home: string; coordCwd: string; sel
         if (e.kind !== 'file') continue
         known.add(e.name)
         try {
-          const mtimeMs = (await io.fs.stat(`${dir}/alive/${e.name}`)).mtimeMs
+          // The listing carries each file's time: no stat per heartbeat file
+          const mtimeMs = e.mtimeMs
           // A chat gone for good or this one needs no look at its beat
-          const beat = e.name === o.selfSid || o.now - mtimeMs >= GONE_MS ? undefined : readBeat(await io.fs.read(`${dir}/alive/${e.name}`))
+          const beat = e.name === o.selfSid || o.now - mtimeMs >= GONE_MS ? undefined : readBeat(await io.fs.read(`${dir}/alive/${e.name}`), mtimeMs)
           found.push({ sid: e.name, cwd, repo: `${dir}/repo.git`, mtimeMs, ...(beat ? { beat } : {}) })
         } catch {
           // A heartbeat file that went away between the listing and the read
@@ -61,12 +62,29 @@ export async function scanPeers(io: Io, o: { home: string; coordCwd: string; sel
   return { peers: ordered(found.filter(p => isPeer(p, o))), known }
 }
 
-/** A peer's newest turn subjects (its commits' first lines) and the files they touched, newest first; empty when its history cannot be read. */
-export async function peerSubjects(io: Io, p: Peer, n: number): Promise<{ subjects: string[]; files: string[] }> {
-  const none = { subjects: [], files: [] }
+/**
+ * Whether a peer's session branch is there, when reading it failed: `missing` only when git answered that
+ * the ref does not exist (exit 1 from `rev-parse --verify -q`), so a broken repo or a timeout is never
+ * taken for a chat that has recorded nothing yet.
+ */
+async function branchMissing(io: Io, p: Peer): Promise<boolean> {
+  try {
+    const r = await git(io, ['rev-parse', '--verify', '-q', `refs/heads/session/${p.sid}`], { cwd: '/' }, p.repo)
+    return r.code === 1 && r.out === ''
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A peer's newest turn subjects (its commits' first lines) and the files they touched, newest first. Empty
+ * when its branch does not exist yet; `failed` when git could not read it (an error or a timeout).
+ */
+export async function peerSubjects(io: Io, p: Peer, n: number): Promise<PeerDetail> {
+  const failed: PeerDetail = { subjects: [], files: [], failed: true }
   try {
     const r = await git(io, ['log', '--first-parent', '-n', String(n), '--format=%s%x1f%(trailers:key=Files,valueonly,separator=%x2c)', `refs/heads/session/${p.sid}`], { cwd: '/' }, p.repo)
-    if (!r.ok) return none
+    if (!r.ok) return (await branchMissing(io, p)) ? { subjects: [], files: [] } : failed
     const subjects: string[] = []
     const files = new Set<string>()
     for (const line of r.out.split('\n')) {
@@ -77,34 +95,53 @@ export async function peerSubjects(io: Io, p: Peer, n: number): Promise<{ subjec
     }
     return { subjects, files: [...files] }
   } catch {
-    return none
+    return failed
   }
 }
 
 /**
- * How many Claude Code chats inside `coordCwd` wrote to their transcript in the last 3 minutes and have
- * no heartbeat (`known` holds the ones that do). Only those transcripts' first 8 KiB are read, to tell a
- * chat someone types into from an SDK run.
+ * The Claude Code chats inside `coordCwd` that wrote to their transcript in the last 3 minutes and have no
+ * heartbeat (`known` holds the ones that do): how many, and the folders they run in. Only those
+ * transcripts' first 8 KiB are read, to tell a chat someone types into from an SDK run. Each folder and
+ * each transcript is tried on its own, so one that cannot be read never hides the others.
  */
-export async function unseenCount(io: Io, o: { projectsDir: string; coordCwd: string; known: ReadonlySet<string>; now: number }): Promise<number> {
+export async function unseenChats(io: Io, o: { projectsDir: string; coordCwd: string; known: ReadonlySet<string>; now: number }): Promise<{ count: number; folders: string[] }> {
   const prefix = o.coordCwd.replace(/\/+$/, '').replace(/[^A-Za-z0-9]/g, '-')
-  const chats = new Set<string>()
+  const chats = new Map<string, string>()
+  let dirs
   try {
-    for (const d of await io.fs.list(o.projectsDir)) {
-      if (d.kind !== 'dir' || !d.name.startsWith(prefix)) continue
-      for (const t of await io.fs.list(`${o.projectsDir}/${d.name}`)) {
+    dirs = await io.fs.list(o.projectsDir)
+  } catch {
+    // No transcripts folder: nothing unseen
+    return { count: 0, folders: [] }
+  }
+  for (const d of dirs) {
+    if (d.kind !== 'dir' || !d.name.startsWith(prefix)) continue
+    let transcripts
+    try {
+      transcripts = await io.fs.list(`${o.projectsDir}/${d.name}`)
+    } catch {
+      continue
+    }
+    for (const t of transcripts) {
+      try {
         if (t.kind !== 'file' || !t.name.endsWith('.jsonl') || o.now - t.mtimeMs >= GONE_MS) continue
         if (o.known.has(t.name.slice(0, -'.jsonl'.length))) continue
         const r = await io.process.run(['head', '-c', '8192', `${o.projectsDir}/${d.name}/${t.name}`], { cwd: '/', timeoutMs: 5_000 })
         if (r.exitCode !== 0) continue
         const seen = isUnseenHead(r.stdout, o.coordCwd)
-        if (seen && !o.known.has(seen.sid)) chats.add(seen.sid)
+        if (seen && !o.known.has(seen.sid)) chats.set(seen.sid, seen.cwd)
+      } catch {
+        // A transcript that went away or a head that timed out: the next one is still read
       }
     }
-  } catch {
-    // No transcripts folder: nothing unseen
   }
-  return chats.size
+  return { count: chats.size, folders: [...new Set(chats.values())] }
+}
+
+/** How many chats here convo does not record: the Live tab's number. */
+export async function unseenCount(io: Io, o: { projectsDir: string; coordCwd: string; known: ReadonlySet<string>; now: number }): Promise<number> {
+  return (await unseenChats(io, o)).count
 }
 
 /**
@@ -131,6 +168,7 @@ export async function collectLive(io: Io, o: { home: string; coordCwd: string; s
       since: p.beat?.since ?? p.mtimeMs,
       ...(p.beat?.prompt ? { prompt: p.beat.prompt } : {}),
       subjects: subjects[i]?.subjects ?? [],
+      ...(subjects[i]?.failed ? { failed: true as const } : {}),
     })),
     unseen,
     working,
@@ -155,10 +193,10 @@ export async function peersTool(io: Io, input: { chat?: unknown; turns?: unknown
     known.add(o.selfSid)
     const [subjects, unseen] = await Promise.all([
       Promise.all(peers.map(p => peerSubjects(io, p, 5))),
-      unseenCount(io, { projectsDir: o.projectsDir, coordCwd: o.coordCwd, known, now }),
+      unseenChats(io, { projectsDir: o.projectsDir, coordCwd: o.coordCwd, known, now }),
     ])
     const details = new Map(peers.map((p, i) => [p.sid, subjects[i] ?? { subjects: [], files: [] }]))
-    return mask(peersText({ coordCwd: o.coordCwd, peers, details, unseen, now }))
+    return mask(peersText({ coordCwd: o.coordCwd, peers, details, unseen: unseen.count, unseenFolders: unseen.folders, now }))
   }
   const want = chat.toLowerCase()
   const name = (p: Peer): string => relName(o.coordCwd, p.cwd)
@@ -172,8 +210,10 @@ export async function peersTool(io: Io, input: { chat?: unknown; turns?: unknown
   const n = Number.isFinite(asked) ? Math.min(Math.max(asked, 1), 20) : 5
   const ref = `refs/heads/session/${peer.sid}`
   const label = `${name(peer)} (${peer.sid.slice(0, 8)})`
-  const ls = await git(io, ['ls-tree', '--name-only', ref, 'turns/'], { cwd: '/' }, peer.repo)
-  const names = ls.ok && ls.out ? ls.out.split('\n').slice(-n) : []
+  const ls = await git(io, ['ls-tree', '--name-only', ref, 'turns/'], { cwd: '/' }, peer.repo).catch(() => undefined)
+  // A branch that is not there yet has recorded nothing; any other failure (an error, a timeout) is not "nothing"
+  if (!ls?.ok && !(ls && (await branchMissing(io, peer)))) return `${label}: its turns could not be read (git failed).`
+  const names = ls?.ok && ls.out ? ls.out.split('\n').slice(-n) : []
   if (!names.length) return `${label} has no turns recorded yet.`
   const texts = await readFiles(io, names.map(f => `${ref}:${f}`), peer.repo, { cwd: '/' })
   const parts = names.map(f => {

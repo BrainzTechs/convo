@@ -140,8 +140,8 @@ const head = (...lines: string[]): string => [...queue, ...lines].join('\n') + '
 
 describe('chats convo has not seen', () => {
   test('a Claude Code chat inside the folder gives its session; an SDK run does not', () => {
-    expect(isUnseenHead(head(line('cli', BACKEND)), COORD)).toEqual({ sid: SID })
-    expect(isUnseenHead(head(line('claude-desktop', BACKEND)), COORD)).toEqual({ sid: SID })
+    expect(isUnseenHead(head(line('cli', BACKEND)), COORD)).toEqual({ sid: SID, cwd: BACKEND })
+    expect(isUnseenHead(head(line('claude-desktop', BACKEND)), COORD)).toEqual({ sid: SID, cwd: BACKEND })
     expect(isUnseenHead(head(line('sdk-py', BACKEND)), COORD)).toBeUndefined()
     expect(isUnseenHead(head(line('sdk-cli', BACKEND)), COORD)).toBeUndefined()
   })
@@ -149,13 +149,13 @@ describe('chats convo has not seen', () => {
   test('a chat outside the folder, or in a name-prefix neighbour, is not one', () => {
     expect(isUnseenHead(head(line('cli', OLD)), COORD)).toBeUndefined()
     expect(isUnseenHead(head(line('cli', '/Users/illusionist/src')), COORD)).toBeUndefined()
-    expect(isUnseenHead(head(line('cli', COORD)), `${COORD}/`)).toEqual({ sid: SID })
+    expect(isUnseenHead(head(line('cli', COORD)), `${COORD}/`)).toEqual({ sid: SID, cwd: COORD })
   })
 
   test('a last line cut by the 8 KiB limit is ignored; the whole lines before it still count', () => {
     const torn = line('cli', BACKEND).slice(0, 120)
     expect(isUnseenHead(head(torn), COORD)).toBeUndefined()
-    expect(isUnseenHead(head(line('cli', BACKEND), torn), COORD)).toEqual({ sid: SID })
+    expect(isUnseenHead(head(line('cli', BACKEND), torn), COORD)).toEqual({ sid: SID, cwd: BACKEND })
     expect(isUnseenHead('', COORD)).toBeUndefined()
     expect(isUnseenHead('not json\n[1,2]\nnull\n', COORD)).toBeUndefined()
   })

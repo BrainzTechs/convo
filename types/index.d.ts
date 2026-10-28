@@ -58,8 +58,8 @@ export type ConvoDetail = { asked: string; answer: string; tools: string[]; file
 /** The pane's own state: the tab, and the turn (or `agent:<id>`) open in it, with a turn's detail. */
 export type ConvoUi = { tab: 'history' | 'context' | 'lines' | 'agents' | 'live'; open?: string; detail?: ConvoDetail }
 
-/** Another chat running inside this chat's folder, as the Live tab shows it. `name` is its folder from this one's; `unknown` is a chat with no beat yet (an older convo). */
-export type ConvoLivePeer = { sid: string; name: string; state: 'working' | 'idle' | 'unknown'; since: number; prompt?: string; subjects: string[] }
+/** Another chat running inside this chat's folder, as the Live tab shows it. `name` is its folder from this one's; `unknown` is a chat with no beat yet (an older convo); `failed` when its history could not be read (git failed), not merely empty. */
+export type ConvoLivePeer = { sid: string; name: string; state: 'working' | 'idle' | 'unknown'; since: number; prompt?: string; subjects: string[]; failed?: true }
 
 /** The Live tab: the other live chats here, working ones first, how many work now, the chats convo does not record, and when this was read. */
 export type ConvoLive = { peers: ConvoLivePeer[]; unseen: number; working: number; at: number }

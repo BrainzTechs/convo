@@ -286,6 +286,11 @@ describe('the Live tab', () => {
     // A row with no subjects yet says so when opened
     const w = liveNodes(live, { tab: 'live', open: `peer:${SID.w}` }, 100, now).map(n => n.text)
     expect(w).toContain('    no turns recorded yet')
+    // One whose history git could not read says that, not "nothing recorded"
+    const failed = { ...live, peers: live.peers.map(p => (p.sid === SID.w ? { ...p, failed: true as const } : p)) }
+    const f = liveNodes(failed, { tab: 'live', open: `peer:${SID.w}` }, 100, now).map(n => n.text)
+    expect(f).toContain('    could not be read (git failed)')
+    expect(f).not.toContain('    no turns recorded yet')
   })
 
   test('the tab shows how many work, on every tab, with hotkey 5; the list draws on both surfaces and a press shows the subjects without git', async ($, on) => {
