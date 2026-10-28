@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { Io } from '../hooks/io.ts'
 import { beatText, type Beat, type Peer } from '../hooks/live.ts'
 import { git, readFiles } from '../hooks/git.ts'
-import { peerSubjects, scanPeers, unseenCount } from '../hooks/peers.ts'
+import { collectLive, peerSubjects, scanPeers, unseenCount } from '../hooks/peers.ts'
 import { S } from '../hooks/state.ts'
 
 const NOW = 1792913206856
@@ -243,6 +243,86 @@ describe('chats convo has not seen', () => {
 
   test('no projects folder is no chats', async () => {
     expect(await unseenCount(fakeIo({}).io, { ...u, known: new Set() })).toBe(0)
+  })
+})
+
+describe('the Live tab\'s numbers', () => {
+  const PROJECTS = `${HOME}/.claude/projects`
+  const F_BACK = '-Users-illusionist-Documents-projects-brainztechs-momopay-backend-aaaa1111'
+  const F_FRONT = '-Users-illusionist-Documents-projects-brainztechs-momopay-frontend-bbbb2222'
+  const DIR = '-Users-illusionist-Documents-projects-brainztechs-momopay-backend'
+  const US = '\x1f'
+  const base: Record<string, File> = {
+    [`${folder(F_BACK)}/cwd`]: { text: `${COORD}/backend\n`, mtimeMs: 1 },
+    [`${folder(F_BACK)}/alive/${A}`]: { text: beatText(beat({ state: 'working', since: NOW - 180_000, prompt: 'migrate payments repo to sqlc' })), mtimeMs: NOW - 4_000 },
+    [`${folder(F_FRONT)}/cwd`]: { text: `${COORD}/frontend\n`, mtimeMs: 1 },
+    [`${folder(F_FRONT)}/alive/${B}`]: { text: beatText(beat({ state: 'idle', since: NOW - 720_000, prompt: 'checkout form validation' })), mtimeMs: NOW - 4_000 },
+  }
+  const c = { home: HOME, coordCwd: COORD, selfSid: ME, projectsDir: PROJECTS, now: NOW }
+
+  test('a cheap pass counts who works and git is not asked; the rows and unseen count stay as the last full pass left them', async () => {
+    const { io, calls } = fakeIo(base)
+    const prev = { peers: [{ sid: 'old', name: 'x', state: 'idle' as const, since: 1, subjects: ['turn 1: a'] }], unseen: 3, working: 0, at: 1 }
+    expect(await collectLive(io, { ...c, full: false, prev })).toEqual({ peers: prev.peers, unseen: 3, working: 1, at: NOW })
+    expect(await collectLive(io, { ...c, full: false })).toEqual({ peers: [], unseen: 0, working: 1, at: NOW })
+    expect(calls).toEqual([])
+  })
+
+  test('a full pass reads each peer\'s last 5 subjects and counts the unseen, naming folders from the coordinator', async () => {
+    const { io, calls } = fakeIo(base, argv => (argv[0] === 'git' ? { exitCode: 0, stdout: `turn 2: x${US}\nturn 1: y${US}\n` } : { exitCode: 1 }))
+    const r = await collectLive(io, { ...c, full: true })
+    expect(r).toEqual({
+      peers: [
+        { sid: A, name: 'backend', state: 'working', since: NOW - 180_000, prompt: 'migrate payments repo to sqlc', subjects: ['turn 2: x', 'turn 1: y'] },
+        { sid: B, name: 'frontend', state: 'idle', since: NOW - 720_000, prompt: 'checkout form validation', subjects: ['turn 2: x', 'turn 1: y'] },
+      ],
+      unseen: 0,
+      working: 1,
+      at: NOW,
+    })
+    expect(calls.filter(x => x.argv[0] === 'git').every(x => x.argv.includes('5'))).toBe(true)
+  })
+
+  test('a peer with no beat is "unknown" and goes by its file\'s time', async () => {
+    const { io } = fakeIo({ ...base, [`${folder(F_FRONT)}/alive/${B}`]: { text: '1792728666987', mtimeMs: NOW - 9_000 } })
+    const r = await collectLive(io, { ...c, full: true })
+    expect(r.peers.find(p => p.sid === B)).toEqual({ sid: B, name: 'frontend', state: 'unknown', since: NOW - 9_000, subjects: [] })
+  })
+
+  test('this chat\'s own fresh transcript is never unseen, even when its heartbeat file is missing', async () => {
+    const head = (sid: string) => JSON.stringify({ entrypoint: 'cli', cwd: `${COORD}/backend`, sessionId: sid }) + '\n'
+    const { io } = fakeIo(
+      {
+        ...base,
+        [`${PROJECTS}/${DIR}/${ME}.jsonl`]: { text: '', mtimeMs: NOW - 5_000 },
+        [`${PROJECTS}/${DIR}/${A}.jsonl`]: { text: '', mtimeMs: NOW - 5_000 }, // a peer with a heartbeat: known
+        [`${PROJECTS}/${DIR}/${'9'.repeat(8)}-0000-4000-8000-000000000000.jsonl`]: { text: '', mtimeMs: NOW - 5_000 }, // really unseen
+      },
+      argv => {
+        const f = argv[3] ?? ''
+        if (f.includes(ME)) return { exitCode: 0, stdout: head(ME) }
+        if (f.includes(A)) return { exitCode: 0, stdout: head(A) }
+        return { exitCode: 0, stdout: head('99999999-0000-4000-8000-000000000000') }
+      },
+    )
+    expect((await collectLive(io, { ...c, full: true })).unseen).toBe(1)
+  })
+
+  test('the peers\' git reads run together, not one after another', async () => {
+    const { io } = fakeIo(base, argv => ({ exitCode: argv[0] === 'git' ? 0 : 1, stdout: `turn 1: y${US}\n` }))
+    let inFlight = 0
+    let most = 0
+    const run = io.process.run
+    io.process.run = async (argv, opts) => {
+      if (argv[0] !== 'git') return run(argv, opts)
+      inFlight++
+      most = Math.max(most, inFlight)
+      for (let i = 0; i < 30; i++) await Promise.resolve()
+      inFlight--
+      return run(argv, opts)
+    }
+    await collectLive(io, { ...c, full: true })
+    expect(most).toBe(2)
   })
 })
 

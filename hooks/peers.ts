@@ -3,7 +3,8 @@
 
 import type { Io } from './io.ts'
 import { git } from './git.ts'
-import { GONE_MS, isInside, isPeer, isUnseenHead, ordered, parseBeat, type Beat, type Peer } from './live.ts'
+import { GONE_MS, isInside, isPeer, isUnseenHead, ordered, parseBeat, relName, type Beat, type Peer } from './live.ts'
+import type { ConvoLive } from '../types/index.d.ts'
 
 /** What each project folder's `cwd` file said, kept for the life of the process: it is written once. */
 const folderCwd = new Map<string, string>()
@@ -103,4 +104,35 @@ export async function unseenCount(io: Io, o: { projectsDir: string; coordCwd: st
     // No transcripts folder: nothing unseen
   }
   return chats.size
+}
+
+/**
+ * What the Live tab shows. A cheap pass is the scan alone: who works now, with the rows and the unseen
+ * count left as `prev` had them. A full pass also reads each peer's last 5 turn subjects (all peers at
+ * once: one slow repo costs the pass its own time, not the sum) and counts the chats convo has not
+ * seen, never counting this chat itself.
+ */
+export async function collectLive(io: Io, o: { home: string; coordCwd: string; selfSid: string; projectsDir: string; now: number; full: boolean; prev?: ConvoLive }): Promise<ConvoLive> {
+  const { peers, known } = await scanPeers(io, o)
+  const working = peers.filter(p => p.beat?.state === 'working').length
+  if (!o.full) return { peers: o.prev?.peers ?? [], unseen: o.prev?.unseen ?? 0, working, at: o.now }
+  // unseenCount does not leave a chat out by itself: its own transcript is fresh and may have no heartbeat file yet
+  known.add(o.selfSid)
+  const [subjects, unseen] = await Promise.all([
+    Promise.all(peers.map(p => peerSubjects(io, p, 5))),
+    unseenCount(io, { projectsDir: o.projectsDir, coordCwd: o.coordCwd, known, now: o.now }),
+  ])
+  return {
+    peers: peers.map((p, i) => ({
+      sid: p.sid,
+      name: relName(o.coordCwd, p.cwd),
+      state: p.beat?.state === 'working' ? 'working' : p.beat?.state === 'idle' ? 'idle' : 'unknown',
+      since: p.beat?.since ?? p.mtimeMs,
+      ...(p.beat?.prompt ? { prompt: p.beat.prompt } : {}),
+      subjects: subjects[i]?.subjects ?? [],
+    })),
+    unseen,
+    working,
+    at: o.now,
+  }
 }

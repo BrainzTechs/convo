@@ -38,7 +38,7 @@ import { condense } from './condense.ts'
 import { mask } from './redact.ts'
 import { addUsage, backfillUsage, emptyUsage, loadUsage, parseKeep, projectDays, saveUsage, setupSavings, shouldHoldBack, usedInWindow, type Usage } from './setup.ts'
 import { addRequest, addTurn, dayOf, historyText, sumDays, weekLine } from './spend.ts'
-import type { ConvoAgent, ConvoEntry, ConvoLedger, ConvoUi, ConvoView } from '../types/index.d.ts'
+import type { ConvoAgent, ConvoEntry, ConvoLedger, ConvoLive, ConvoUi, ConvoView } from '../types/index.d.ts'
 import { coldToast, ttlOf, warmthOf } from './warmth.ts'
 import { HANDBACK, called, endToast, finished, priced, returned, spawned, statusLine, statusOf, stepped, stuckOf, trimmed, weightOf } from './agents.ts'
 import { panelNodes, type Action, type PanelButton } from './panel.ts'
@@ -46,6 +46,7 @@ import { buildTimeline, toolsLine, turnDetail } from './timeline.ts'
 import { revOf } from './git.ts'
 import { withTrailers } from './lineage.ts'
 import { decideActive, parseExclude } from './live.ts'
+import { collectLive } from './peers.ts'
 
 /**
  * The engine as convo's modules use it. Claude Code follows `$` only into
@@ -121,20 +122,49 @@ async function act($: EngineInterface, a: Action): Promise<void> {
     const ui: ConvoUi = (await $.state.get(UI)).value ?? { tab: 'history' }
     if (a.kind === 'tab') {
       await $.state.set(UI, { ...ui, tab: a.tab })
+      // The Live tab opens on fresh rows, not on those of the last 15 s tick
+      if (a.tab === 'live') void liveTick($, true)
     } else if (a.kind === 'fill') {
       await $.prompt.fill({ text: a.text, mode: 'replace' })
     } else if (ui.open === a.id) {
       await $.state.set(UI, { tab: ui.tab })
     } else {
       await $.state.set(UI, { tab: ui.tab, open: a.id })
-      // An agent's row opens on what the tab already holds
-      if (a.id.startsWith('agent:')) return
+      // An agent's or a peer's row opens on what the tab already holds
+      if (a.id.startsWith('agent:') || a.id.startsWith('peer:')) return
       const detail = a.path && a.tip ? await turnDetail(ioOf($), a.tip, a.path) : undefined
       const now: ConvoUi = (await $.state.get(UI)).value ?? { tab: 'history' }
       if (now.open === a.id) await $.state.set(UI, { ...now, detail: detail ?? { asked: '', answer: '(not found in git yet: it is committed a moment after the turn ends)', tools: [], files: [] } })
     }
   } catch (err) {
     $.ui.log(`convo: the pane's ${a.kind} did not go through: ${String(err).slice(0, 200)}`, { to: 'debug' })
+  }
+}
+
+// ── The other chats in this folder ───────────────────────────────────
+// The Live tab. Nothing is scanned unless the pane is open: every 30 s a cheap scan keeps the tab's count
+// (heartbeat files only), and every 15 s, while the Live tab is showing, the rows are read in full.
+const LIVE = { plugin: 'convo', key: 'live' } as const
+/** Whether convo's pane is placed beside the chat. */
+let paneOpen = false
+/** A tick still under way: a peer's git read can take 20 s, so the next tick waits for it. */
+let liveBusy = false
+/** The person's home folder, where session.start found it. */
+let liveHome = ''
+
+async function liveTick($: EngineInterface, full: boolean): Promise<void> {
+  if (!paneOpen || liveBusy || !S.active) return
+  liveBusy = true
+  try {
+    if (full && ((await $.state.get(UI)).value ?? { tab: 'history' }).tab !== 'live') return
+    const prev: ConvoLive | undefined = (await $.state.get(LIVE).catch(() => undefined))?.value
+    const live = await collectLive(ioOf($), { home: liveHome, coordCwd: S.cwd, selfSid: S.sid, projectsDir: S.projectsDir, now: Date.now(), full, ...(prev ? { prev } : {}) })
+    // A cheap pass redraws only when the count moved
+    if (full || live.working !== (prev?.working ?? 0)) await $.state.set(LIVE, live)
+  } catch (err) {
+    $.ui.log(`convo: the Live tab was not refreshed: ${String(err).slice(0, 200)}`, { to: 'debug' })
+  } finally {
+    liveBusy = false
   }
 }
 
@@ -738,6 +768,7 @@ export const register: Register = (on, options) => {
     // A reload: what this process held back before it
     if (!Object.keys(heldTools).length) Object.assign(heldTools, (await $.state.get(HELD).catch(() => undefined))?.value ?? {})
     S.cwd = e.cwd
+    liveHome = home
     S.root = home ? await projectRoot(io, home, e.cwd) : ''
     S.repo = `${S.root}/repo.git`
     S.projectsDir = `${(await $.env.get('CLAUDE_CONFIG_DIR')) ?? (home ? `${home}/.claude` : '.')}/projects`
@@ -757,6 +788,8 @@ export const register: Register = (on, options) => {
     $.clock.every(2000, () => tickAgents($))
     seenHour = (await $.store.get('cache-seen-1h').catch(() => undefined)) === true
     $.clock.every(30_000, () => tickCache($))
+    $.clock.every(30_000, () => liveTick($, false))
+    $.clock.every(15_000, () => liveTick($, true))
     if (!S.gitOk) {
       showStatus($, `history is off (${why})`)
     } else {
@@ -792,7 +825,7 @@ export const register: Register = (on, options) => {
     }
     await saveLedger($)
     // Beside the chat on a wide enough screen, unless the person closed it; asking Claude brings it back
-    if (e.isInteractive && (await $.store.get('pane-closed')) !== true) void $.ui.open({ id: PANE, title: 'convo' })
+    if (e.isInteractive && (await $.store.get('pane-closed')) !== true) void $.ui.open({ id: PANE, title: 'convo' }).then(r => { paneOpen = r.isPlaced })
     clearingOff = e.isInteractive ? '' : 'a plugin cannot start a compaction outside an interactive session'
     return next(e)
   })
@@ -823,6 +856,7 @@ export const register: Register = (on, options) => {
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     if (!S.active) return next(e)
+    paneOpen = false
     if (e.origin.kind === 'person') await $.store.set('pane-closed', true)
     return next(e)
   })
@@ -841,7 +875,8 @@ export const register: Register = (on, options) => {
       view = { ...view, ...history, questions: [], lines: [], merges: [], context: undefined }
     }
     const agents = (await $.state.get(AGENTS)).value ?? []
-    const nodes = panelNodes({ view, ledger: tokens, ui, width, now: Date.now(), focused: e.props.isFocused, agents, ...(agent ? { agent } : {}) })
+    const live = (await $.state.get(LIVE)).value
+    const nodes = panelNodes({ view, ledger: tokens, ui, width, now: Date.now(), focused: e.props.isFocused, agents, ...(live ? { live } : {}), ...(agent ? { agent } : {}) })
     // Drawn with h() rather than JSX, so this module stays a .ts file Node can run in the tests
     const button = (n: PanelButton): RenderElement => h(Button, { key: n.key, plain: true, ...(n.hotkey ? { hotkey: n.hotkey } : {}), ...(n.tone === 'dim' ? { dimColor: true } : {}), onPress: () => void act($, n.action) }, n.tone === 'bold' ? h(Text, { bold: true }, n.text) : n.text) as RenderElement
     return h(Box, { flexDirection: 'column' }, ...nodes.map(n => (n.t === 'text'
@@ -941,6 +976,7 @@ export const register: Register = (on, options) => {
       await $.store.set('pane-closed', false)
       await publish($, true)
       const opened = await $.ui.open({ id: PANE, title: 'convo' })
+      paneOpen = opened.isPlaced
       return { result: opened.isPlaced ? "convo's pane is open beside the chat." : `convo's pane is open but not shown here: ${opened.reason}.` }
     }
     if (!S.gitOk) return { result: `convo is off in this session: ${S.offWhy}.` }
